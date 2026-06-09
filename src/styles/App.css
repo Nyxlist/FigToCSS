@@ -1,0 +1,177 @@
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 32px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.app-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.app-steps {
+  display: flex;
+  gap: 8px;
+}
+
+.step-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--color-text-muted);
+  transition: all 0.2s;
+}
+
+.step-indicator.active {
+  background: var(--color-primary);
+  color: white;
+}
+
+.step-indicator.done {
+  color: var(--color-success);
+}
+
+.step-number {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--color-surface-hover);
+}
+
+.step-indicator.active .step-number {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.step-indicator.done .step-number {
+  background: var(--color-success);
+  color: white;
+}
+
+.step-label {
+  font-weight: 500;
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 32px;
+  max-width: 1200px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* Shared component styles */
+.panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 32px;
+}
+
+.panel-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.panel-subtitle {
+  color: var(--color-text-muted);
+  font-size: 14px;
+  margin-bottom: 24px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--color-primary-hover);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+
+.btn-secondary:hover {
+  background: var(--color-border);
+}
+
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.input-group label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+
+.input-group input {
+  padding: 10px 14px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  transition: border-color 0.15s;
+}
+
+.input-group input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.error-message {
+  color: var(--color-error);
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+.btn-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}
