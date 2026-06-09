@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { fetchFigmaFile } from '../lib/figmaApi';
 import '../styles/ConnectStep.css';
 
 export default function ConnectStep({ onFileLoaded }) {
@@ -42,16 +43,7 @@ export default function ConnectStep({ onFileLoaded }) {
     }
 
     try {
-      const response = await fetch(`/api/figma/file/${key}`, {
-        headers: { 'X-Figma-Token': accessToken },
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || `Request failed with status ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = await fetchFigmaFile(key, accessToken);
       onFileLoaded(data, accessToken, key);
     } catch (err) {
       setError(err.message || 'Failed to connect to Figma. Check your credentials.');

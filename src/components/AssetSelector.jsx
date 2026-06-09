@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { fetchFigmaImages } from '../lib/figmaApi';
 import '../styles/AssetSelector.css';
 
 // Known Google Fonts (subset — most common ones)
@@ -123,13 +124,8 @@ export default function AssetSelector({
     setImageLoading(true);
     setImageError('');
     try {
-      const nodeIds = imageNodes.map((n) => n.nodeId).join(',');
-      const response = await fetch(
-        `/api/figma/file/${fileKey}/images?ids=${encodeURIComponent(nodeIds)}&format=png&scale=2`,
-        { headers: { 'X-Figma-Token': token } }
-      );
-      if (!response.ok) throw new Error(`Failed (${response.status})`);
-      const data = await response.json();
+      const nodeIds = imageNodes.map((n) => n.nodeId);
+      const data = await fetchFigmaImages(fileKey, token, nodeIds, 'png', '2');
       const assets = imageNodes.map((node) => ({
         ...node,
         url: data.images?.[node.nodeId] || null,

@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { generateCSS, generateHTML } from '../lib/cssGenerator';
+import { fetchFigmaImages } from '../lib/figmaApi';
 import '../styles/CSSOutput.css';
 
 const DEVICES = {
@@ -187,17 +188,11 @@ ${bodyHTML}
     }
     setFigmaImageLoading(true);
     try {
-      const nodeIds = selectedNodes.map((n) => n.id).join(',');
-      const response = await fetch(
-        `/api/figma/file/${fileKey}/images?ids=${encodeURIComponent(nodeIds)}&format=png&scale=2`,
-        { headers: { 'X-Figma-Token': token } }
-      );
-      if (response.ok) {
-        const data = await response.json();
-        if (data.images) {
-          const firstImage = Object.values(data.images).find(Boolean);
-          setFigmaImageUrl(firstImage || null);
-        }
+      const nodeIds = selectedNodes.map((n) => n.id);
+      const data = await fetchFigmaImages(fileKey, token, nodeIds, 'png', '2');
+      if (data.images) {
+        const firstImage = Object.values(data.images).find(Boolean);
+        setFigmaImageUrl(firstImage || null);
       } else {
         setFigmaImageUrl(null);
       }
