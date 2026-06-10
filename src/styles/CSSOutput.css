@@ -19,6 +19,40 @@
   font-size: 12px;
 }
 
+/* Frame selector for multiple selected frames */
+.frame-selector {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 4px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  flex-wrap: nowrap;
+}
+
+.frame-tab {
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.frame-tab:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.frame-tab.active {
+  background: var(--color-primary);
+  color: white;
+}
+
 /* Tabs row */
 .output-tabs-row {
   display: flex;
