@@ -7,27 +7,6 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json());
 
-// Helper: fetch with retry on 429 rate limit
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 3000;
-
-async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const response = await fetch(url, options);
-    if (response.status === 429) {
-      if (attempt >= retries) return response;
-      const retryAfter = response.headers.get('Retry-After');
-      const waitMs = retryAfter
-        ? parseInt(retryAfter, 10) * 1000
-        : BASE_DELAY_MS * Math.pow(2, attempt);
-      console.warn(`Rate limited (429). Retrying in ${Math.round(waitMs / 1000)}s... (attempt ${attempt + 1}/${retries})`);
-      await new Promise((r) => setTimeout(r, waitMs));
-      continue;
-    }
-    return response;
-  }
-}
-
 // Proxy endpoint to fetch Figma file data
 app.get('/api/figma/file/:fileKey', async (req, res) => {
   const { fileKey } = req.params;
@@ -38,7 +17,7 @@ app.get('/api/figma/file/:fileKey', async (req, res) => {
   }
 
   try {
-    const response = await fetchWithRetry(`https://api.figma.com/v1/files/${fileKey}`, {
+    const response = await fetch(`https://api.figma.com/v1/files/${fileKey}`, {
       headers: { 'X-Figma-Token': token },
     });
 
@@ -68,7 +47,7 @@ app.get('/api/figma/file/:fileKey/nodes', async (req, res) => {
   }
 
   try {
-    const response = await fetchWithRetry(
+    const response = await fetch(
       `https://api.figma.com/v1/files/${fileKey}/nodes?ids=${encodeURIComponent(ids)}`,
       { headers: { 'X-Figma-Token': token } }
     );
@@ -99,7 +78,7 @@ app.get('/api/figma/file/:fileKey/images', async (req, res) => {
   }
 
   try {
-    const response = await fetchWithRetry(
+    const response = await fetch(
       `https://api.figma.com/v1/images/${fileKey}?ids=${encodeURIComponent(ids)}&format=${format}&scale=${scale}`,
       { headers: { 'X-Figma-Token': token } }
     );
