@@ -2,50 +2,26 @@
  * Express proxy server for Figma API.
  *
  * Features:
- * - Proxies requests to avoid CORS in development
- * - Concurrency control: max 5 concurrent requests to Figma
- * - Retry logic with exponential backoff
- * - Rate limit info forwarded to client
- * - Per-node image endpoint with staggered fetching
+ * - Rate-limit-aware request queue (50 requests/min, auto-throttle)
+ * - Retry with exponential backoff + Retry-After header support
+ * - Per-node staggered image fetching (prevents 429)
+ * - Concurrency control (max 5 simultaneous)
+ * - Clear error messages with rate limit info
  */
 
 import express from 'express';
 import cors from 'cors';
+import requestQueue from './rateLimitHandler.js';
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 const FIGMA_API = 'https://api.figma.com/v1';
-const MAX_CONCURRENT = 5;
-const MAX_RETRIES = 3;
-const INITIAL_BACKOFF = 1000;
 const REQUEST_TIMEOUT = 15000;
-const IMAGE_STAGGER_MS = 100;
+const IMAGE_STAGGER_MS = 150;
 
 app.use(cors());
 app.use(express.json());
-
-// ─── CONCURRENCY LIMITER (p-limit style) ──────────────────────────────────
-
-let activeCount = 0;
-const queue = [];
-
-function runNext() {
-  if (activeCount >= MAX_CONCURRENT || queue.length === 0) return;
-  activeCount++;
-  const { fn, resolve, reject } = queue.shift();
-  fn().then(resolve, reject).finally(() => {
-    activeCount--;
-    runNext();
-  });
-}
-
-function withLimit(fn) {
-  return new Promise((resolve, reject) => {
-    queue.push({ fn, resolve, reject });
-    runNext();
-  });
-}
 
 // ─── SLEEP HELPER ──────────────────────────────────────────────────────────
 
@@ -53,79 +29,55 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ─── FETCH WITH RETRY & BACKOFF ────────────────────────────────────────────
+// ─── SINGLE FIGMA REQUEST (with timeout, used inside the queue) ────────────
 
-async function figmaFetch(url, token) {
-  let lastError = null;
+async function figmaRequest(url, token) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+  try {
+    const res = await fetch(url, {
+      headers: { 'X-Figma-Token': token },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
 
-    try {
-      const res = await fetch(url, {
-        headers: { 'X-Figma-Token': token },
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-
-      if (res.status === 429) {
-        const retryAfter = res.headers.get('Retry-After');
-        const waitSeconds = retryAfter ? parseInt(retryAfter, 10) : null;
-        const waitMs = waitSeconds
-          ? waitSeconds * 1000
-          : INITIAL_BACKOFF * Math.pow(2, attempt);
-
-        if (attempt >= MAX_RETRIES) {
-          return {
-            ok: false,
-            status: 429,
-            body: {
-              error: waitSeconds
-                ? `Rate limit: wait ${waitSeconds} seconds before retrying`
-                : 'Rate limit: too many requests. Please wait and try again.',
-            },
-          };
-        }
-
-        await sleep(waitMs);
-        continue;
-      }
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        return {
-          ok: false,
-          status: res.status,
-          body: {
-            error: errorData.err || errorData.error || `Figma API returned ${res.status}`,
-          },
-        };
-      }
-
-      const data = await res.json();
-      return { ok: true, status: 200, body: data };
-    } catch (err) {
-      clearTimeout(timeoutId);
-
-      if (err.name === 'AbortError') {
-        lastError = 'Request timed out after 15 seconds';
-      } else {
-        lastError = err.message || 'Network error';
-      }
-
-      if (attempt < MAX_RETRIES) {
-        const backoff = INITIAL_BACKOFF * Math.pow(2, attempt);
-        await sleep(backoff);
-      }
+    if (res.status === 429) {
+      const retryAfter = res.headers.get('Retry-After');
+      const err = new Error(
+        retryAfter
+          ? `Rate limit: wait ${retryAfter} seconds before retrying`
+          : 'Rate limit exceeded. Please wait and try again.'
+      );
+      err.status = 429;
+      err.retryAfter = retryAfter ? parseInt(retryAfter, 10) : 30;
+      throw err;
     }
-  }
 
-  return {
-    ok: false,
-    status: 500,
-    body: { error: lastError || 'Request failed after retries' },
-  };
+    if (res.status >= 500) {
+      const err = new Error(`Figma server error (${res.status})`);
+      err.status = res.status;
+      throw err;
+    }
+
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      const err = new Error(errorData.err || errorData.error || `Figma API returned ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    return await res.json();
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      const timeoutErr = new Error('Request timed out (15s). The Figma API may be slow — try again.');
+      timeoutErr.status = 408;
+      timeoutErr.code = 'TIMEOUT';
+      throw timeoutErr;
+    }
+    throw err;
+  }
 }
 
 // ─── PROXY HELPERS ─────────────────────────────────────────────────────────
@@ -137,13 +89,18 @@ function getToken(req) {
 function requireToken(req, res) {
   const token = getToken(req);
   if (!token) {
-    res.status(401).json({ error: 'Missing Figma access token' });
+    res.status(401).json({ error: 'Missing Figma access token. Add your Personal Access Token in the app.' });
     return null;
   }
   return token;
 }
 
 // ─── ROUTES ────────────────────────────────────────────────────────────────
+
+// Health / status check
+app.get('/api/status', (req, res) => {
+  res.json({ ok: true, queue: requestQueue.getStatus() });
+});
 
 // Fetch full file data
 app.get('/api/figma/file/:fileKey', async (req, res) => {
@@ -154,11 +111,11 @@ app.get('/api/figma/file/:fileKey', async (req, res) => {
   const url = `${FIGMA_API}/files/${fileKey}`;
 
   try {
-    const result = await withLimit(() => figmaFetch(url, token));
-    res.status(result.status).json(result.body);
+    const data = await requestQueue.enqueue(() => figmaRequest(url, token));
+    res.json(data);
   } catch (err) {
-    console.error('Proxy error (file):', err);
-    res.status(500).json({ error: 'Internal proxy error' });
+    console.error('[File]', err.message);
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -172,15 +129,15 @@ app.get('/api/figma/file/:fileKey/nodes', async (req, res) => {
   const url = `${FIGMA_API}/files/${fileKey}/nodes?ids=${encodeURIComponent(ids || '')}`;
 
   try {
-    const result = await withLimit(() => figmaFetch(url, token));
-    res.status(result.status).json(result.body);
+    const data = await requestQueue.enqueue(() => figmaRequest(url, token));
+    res.json(data);
   } catch (err) {
-    console.error('Proxy error (nodes):', err);
-    res.status(500).json({ error: 'Internal proxy error' });
+    console.error('[Nodes]', err.message);
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
-// Fetch batch images (existing behavior)
+// Fetch batch images
 app.get('/api/figma/file/:fileKey/images', async (req, res) => {
   const token = requireToken(req, res);
   if (!token) return;
@@ -190,20 +147,20 @@ app.get('/api/figma/file/:fileKey/images', async (req, res) => {
   const url = `${FIGMA_API}/images/${fileKey}?ids=${encodeURIComponent(ids || '')}&format=${format}&scale=${scale}`;
 
   try {
-    const result = await withLimit(() => figmaFetch(url, token));
-    res.status(result.status).json(result.body);
+    const data = await requestQueue.enqueue(() => figmaRequest(url, token));
+    res.json(data);
   } catch (err) {
-    console.error('Proxy error (images):', err);
-    res.status(500).json({ error: 'Internal proxy error' });
+    console.error('[Images]', err.message);
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
 /**
  * Fetch images ONE AT A TIME with stagger delay.
- * Accepts a JSON body with { ids: string[], format?, scale? }
- * Returns { images: { [nodeId]: url } }
+ * POST body: { ids: string[], format?, scale? }
+ * Returns: { images: { [nodeId]: url | null }, errors?: [...] }
  *
- * This prevents rate-limiting when fetching many node images.
+ * This is the reliable endpoint — fetches sequentially to avoid rate limits.
  */
 app.post('/api/figma/file/:fileKey/images-staggered', async (req, res) => {
   const token = requireToken(req, res);
@@ -222,34 +179,34 @@ app.post('/api/figma/file/:fileKey/images-staggered', async (req, res) => {
   for (let i = 0; i < ids.length; i++) {
     const nodeId = ids[i];
 
-    // Stagger: wait between requests (skip first)
+    // Stagger between requests
     if (i > 0) {
       await sleep(IMAGE_STAGGER_MS);
     }
 
-    const url = `${FIGMA_API}/images/${fileKey}?ids=${encodeURIComponent(nodeId)}&format=${format}&scale=${scale}`;
-
     try {
-      const result = await withLimit(() => figmaFetch(url, token));
-      if (result.ok && result.body.images) {
-        Object.assign(images, result.body.images);
+      const url = `${FIGMA_API}/images/${fileKey}?ids=${encodeURIComponent(nodeId)}&format=${format}&scale=${scale}`;
+      const data = await requestQueue.enqueue(() => figmaRequest(url, token));
+      if (data.images && data.images[nodeId]) {
+        images[nodeId] = data.images[nodeId];
       } else {
-        errors.push({ nodeId, error: result.body?.error || 'Unknown error' });
+        images[nodeId] = null;
       }
     } catch (err) {
+      console.error(`[ImageStagger] Failed for ${nodeId}:`, err.message);
+      images[nodeId] = null;
       errors.push({ nodeId, error: err.message });
     }
   }
 
   const response = { images };
-  if (errors.length > 0) {
-    response.errors = errors;
-  }
+  if (errors.length > 0) response.errors = errors;
   res.json(response);
 });
 
 // ─── START ─────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`Figma proxy server running on http://localhost:${PORT}`);
+  console.log(`✓ Figma proxy running at http://localhost:${PORT}`);
+  console.log(`  Rate limit: ${requestQueue.maxPerMinute} requests/min`);
 });
