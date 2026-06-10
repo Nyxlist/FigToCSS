@@ -4,6 +4,7 @@ import TreeBrowser from './components/TreeBrowser';
 import SettingsPanel from './components/SettingsPanel';
 import AssetSelector from './components/AssetSelector';
 import CSSOutput from './components/CSSOutput';
+import { resetApiState } from './lib/figmaApi';
 import './styles/App.css';
 
 const STEPS = ['Connect', 'Select', 'Settings', 'Assets', 'Generate'];
@@ -26,10 +27,28 @@ export default function App() {
   const [generatedCSS, setGeneratedCSS] = useState('');
 
   const handleFileLoaded = (data, accessToken, key) => {
+    // Clear all previous session data to avoid stale API calls
+    setSelectedNodes([]);
+    setImageAssets([]);
+    setFontAssets([]);
+    setGeneratedCSS('');
+    // Set new session data
     setFileData(data);
     setToken(accessToken);
     setFileKey(key);
     setStep(1);
+  };
+
+  const handleReset = () => {
+    resetApiState();
+    setStep(0);
+    setFileData(null);
+    setToken('');
+    setFileKey('');
+    setSelectedNodes([]);
+    setImageAssets([]);
+    setFontAssets([]);
+    setGeneratedCSS('');
   };
 
   return (
@@ -65,7 +84,7 @@ export default function App() {
             selectedNodes={selectedNodes}
             setSelectedNodes={setSelectedNodes}
             onContinue={() => selectedNodes.length > 0 && setStep(2)}
-            onBack={() => setStep(0)}
+            onBack={handleReset}
           />
         )}
         {step === 2 && (

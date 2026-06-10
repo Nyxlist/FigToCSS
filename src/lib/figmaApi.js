@@ -31,6 +31,14 @@ function enqueue(fn) {
 }
 
 /**
+ * Reset the request queue. Call this when starting a new session
+ * to prevent queued retries from a previous session from running.
+ */
+export function resetApiState() {
+  requestQueue = Promise.resolve();
+}
+
+/**
  * Wrapper around fetch that retries on 429 (rate limit) with exponential backoff.
  * Requests are queued to avoid bursting the rate limit.
  */
