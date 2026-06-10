@@ -28,6 +28,7 @@ export default function CSSOutput({ fileData, selectedNodes, settings, imageAsse
   const [overlayOpacity, setOverlayOpacity] = useState(50);
   const [figmaImageUrl, setFigmaImageUrl] = useState(null);
   const [figmaImageLoading, setFigmaImageLoading] = useState(false);
+  const figmaImageCache = useRef({}); // cache: nodeId → imageUrl
 
   const previewIframeRef = useRef(null);
   const compareIframeRef = useRef(null);
@@ -158,14 +159,23 @@ ${bodyHTML}
     }
   }, [activeTab, compareMode, previewHTML]);
 
-  // Fetch Figma render for compare
+  // Fetch Figma render for compare (with caching)
   const fetchFigmaImage = useCallback(async () => {
     if (!token || !fileKey || !selectedNodes[activeFrame]) { setFigmaImageUrl(null); return; }
+    const nodeId = selectedNodes[activeFrame].id;
+
+    // Return cached image if available
+    if (figmaImageCache.current[nodeId]) {
+      setFigmaImageUrl(figmaImageCache.current[nodeId]);
+      return;
+    }
+
     setFigmaImageLoading(true);
     try {
-      const nodeId = selectedNodes[activeFrame].id;
       const data = await fetchFigmaImages(fileKey, token, [nodeId], 'png', '2');
-      setFigmaImageUrl(data.images?.[nodeId] || null);
+      const url = data.images?.[nodeId] || null;
+      if (url) figmaImageCache.current[nodeId] = url;
+      setFigmaImageUrl(url);
     } catch { setFigmaImageUrl(null); }
     finally { setFigmaImageLoading(false); }
   }, [token, fileKey, selectedNodes, activeFrame]);

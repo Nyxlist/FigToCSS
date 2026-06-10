@@ -8,8 +8,8 @@ app.use(cors());
 app.use(express.json());
 
 // Helper: fetch with retry on 429 rate limit
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 2000;
+const MAX_RETRIES = 5;
+const BASE_DELAY_MS = 10000;
 
 async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -20,7 +20,7 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
       const waitMs = retryAfter
         ? parseInt(retryAfter, 10) * 1000
         : BASE_DELAY_MS * Math.pow(2, attempt);
-      console.warn(`Rate limited (429). Retrying in ${waitMs}ms... (attempt ${attempt + 1}/${retries})`);
+      console.warn(`Rate limited (429). Retrying in ${Math.round(waitMs / 1000)}s... (attempt ${attempt + 1}/${retries})`);
       await new Promise((r) => setTimeout(r, waitMs));
       continue;
     }
