@@ -1,21 +1,21 @@
 /**
- * Figma API client with:
- * - Exponential backoff + Retry-After support
- * - 15s timeout per request
- * - localStorage caching (5-minute TTL)
- * - Per-node sequential image fetching with stagger
- * - Clear error messages for users
+ * Figma API client — fast and reliable.
  *
- * In dev: proxies through localhost:3001/api/figma/...
- * In prod: calls Figma API directly (CORS allowed with token header)
+ * - Batched image fetching (10 per batch, 200ms between batches)
+ * - sessionStorage caching for image URLs
+ * - localStorage caching for file data (5-min TTL)
+ * - Exponential backoff + Retry-After on 429
+ * - 15s timeout per request
+ * - Progressive callback for image loading
  */
 
 const FIGMA_API = 'https://api.figma.com/v1';
 const REQUEST_TIMEOUT = 15000;
 const MAX_RETRIES = 3;
 const INITIAL_BACKOFF = 1500;
-const CACHE_TTL = 5 * 60 * 1000; // 5 min
-const IMAGE_STAGGER_MS = 150;
+const FILE_CACHE_TTL = 5 * 60 * 1000; // 5 min
+const IMAGE_BATCH_SIZE = 15;
+const BATCH_DELAY_MS = 200;
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 
@@ -27,17 +27,16 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** No-op for API compatibility */
 export function resetApiState() {}
 
-// ─── CACHE ─────────────────────────────────────────────────────────────────
+// ─── FILE CACHE (localStorage, 5-min TTL) ──────────────────────────────────
 
-function cacheGet(key) {
+function fileCacheGet(key) {
   try {
     const raw = localStorage.getItem(`ftc_${key}`);
     if (!raw) return null;
     const entry = JSON.parse(raw);
-    if (Date.now() - entry.ts > CACHE_TTL) {
+    if (Date.now() - entry.ts > FILE_CACHE_TTL) {
       localStorage.removeItem(`ftc_${key}`);
       return null;
     }
@@ -45,13 +44,41 @@ function cacheGet(key) {
   } catch { return null; }
 }
 
-function cacheSet(key, data) {
+function fileCacheSet(key, data) {
   try {
     localStorage.setItem(`ftc_${key}`, JSON.stringify({ data, ts: Date.now() }));
-  } catch { /* full or unavailable */ }
+  } catch {}
 }
 
-// ─── FETCH WITH RETRY + BACKOFF ────────────────────────────────────────────
+// ─── IMAGE CACHE (sessionStorage, survives within tab session) ─────────────
+
+function imageCacheGet(nodeId) {
+  try {
+    return sessionStorage.getItem(`ftc_img_${nodeId}`) || null;
+  } catch { return null; }
+}
+
+function imageCacheSet(nodeId, url) {
+  try {
+    if (url) sessionStorage.setItem(`ftc_img_${nodeId}`, url);
+  } catch {}
+}
+
+function imageCacheGetAll(nodeIds) {
+  const cached = {};
+  const uncached = [];
+  for (const id of nodeIds) {
+    const url = imageCacheGet(id);
+    if (url) {
+      cached[id] = url;
+    } else {
+      uncached.push(id);
+    }
+  }
+  return { cached, uncached };
+}
+
+// ─── FETCH WITH RETRY ──────────────────────────────────────────────────────
 
 async function fetchWithRetry(url, options = {}) {
   let lastError = null;
@@ -68,11 +95,10 @@ async function fetchWithRetry(url, options = {}) {
         const retryAfter = res.headers.get('Retry-After');
         const waitSec = retryAfter ? parseInt(retryAfter, 10) : null;
         const waitMs = waitSec ? waitSec * 1000 : INITIAL_BACKOFF * Math.pow(2, attempt);
-
         if (attempt >= MAX_RETRIES) {
           throw new Error(
             waitSec
-              ? `Rate limited by Figma. Please wait ${waitSec} seconds and try again.`
+              ? `Rate limited. Please wait ${waitSec} seconds and try again.`
               : `Too many requests. Please wait a moment and try again.`
           );
         }
@@ -82,112 +108,121 @@ async function fetchWithRetry(url, options = {}) {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        const msg = data.error || data.err || `Request failed (${res.status})`;
-        throw new Error(msg);
+        throw new Error(data.error || data.err || `Request failed (${res.status})`);
       }
 
       return res;
     } catch (err) {
       clearTimeout(timeoutId);
-
       if (err.name === 'AbortError') {
-        lastError = new Error('Request timed out. The Figma API may be slow — please try again.');
+        lastError = new Error('Request timed out. Figma may be slow — try again.');
       } else {
         lastError = err;
       }
-
-      // Don't retry 4xx (except 429 handled above)
-      if (lastError.message.includes('(4') && !lastError.message.includes('429')) {
-        throw lastError;
-      }
-
-      if (attempt < MAX_RETRIES) {
-        await sleep(INITIAL_BACKOFF * Math.pow(2, attempt));
-      }
+      if (lastError.message.includes('(4') && !lastError.message.includes('429')) throw lastError;
+      if (attempt < MAX_RETRIES) await sleep(INITIAL_BACKOFF * Math.pow(2, attempt));
     }
   }
 
-  throw lastError || new Error('Request failed after multiple retries.');
+  throw lastError || new Error('Request failed after retries.');
 }
 
-// ─── PUBLIC API ────────────────────────────────────────────────────────────
+// ─── PUBLIC: FETCH FILE ────────────────────────────────────────────────────
 
-/**
- * Fetch Figma file metadata and document tree.
- * Cached in localStorage for 5 minutes.
- */
 export async function fetchFigmaFile(fileKey, token) {
-  // Check cache first
-  const cached = cacheGet(`file_${fileKey}`);
+  const cached = fileCacheGet(`file_${fileKey}`);
   if (cached) return cached;
 
   const url = isLocalDev()
     ? `/api/figma/file/${fileKey}`
     : `${FIGMA_API}/files/${fileKey}`;
 
-  const res = await fetchWithRetry(url, {
-    headers: { 'X-Figma-Token': token },
-  });
-
+  const res = await fetchWithRetry(url, { headers: { 'X-Figma-Token': token } });
   const data = await res.json();
-  cacheSet(`file_${fileKey}`, data);
+  fileCacheSet(`file_${fileKey}`, data);
   return data;
 }
 
+// ─── PUBLIC: FETCH IMAGES (BATCHED, FAST) ──────────────────────────────────
+
 /**
- * Fetch rendered images for node IDs.
- * Uses batch endpoint for small sets, staggered for larger sets.
+ * Fetch rendered images for an array of node IDs.
+ * Uses batches of 15 with 200ms between batches.
+ * Checks sessionStorage cache first — only fetches uncached nodes.
+ *
+ * @param {string} fileKey
+ * @param {string} token
+ * @param {string[]} nodeIds
+ * @param {object} options - { format, scale, onProgress }
+ *   onProgress(loaded, total) called after each batch
+ * @returns {{ images: Record<string, string|null> }}
  */
-export async function fetchFigmaImages(fileKey, token, nodeIds, format = 'png', scale = '2') {
+export async function fetchFigmaImages(fileKey, token, nodeIds, options = {}) {
+  const { format = 'png', scale = '1', onProgress } = typeof options === 'string'
+    ? { format: options, scale: arguments[4] || '1' }  // backwards compat: (fileKey, token, ids, format, scale)
+    : options;
+
   const ids = Array.isArray(nodeIds) ? nodeIds : [nodeIds];
 
-  // For small batches (≤5), use the batch endpoint
-  if (ids.length <= 5) {
-    const idsStr = ids.join(',');
+  // Check cache first
+  const { cached, uncached } = imageCacheGetAll(ids);
+  const allImages = { ...cached };
+
+  if (uncached.length === 0) {
+    if (onProgress) onProgress(ids.length, ids.length);
+    return { images: allImages };
+  }
+
+  // Fetch uncached in batches
+  let loaded = Object.keys(cached).length;
+  const total = ids.length;
+
+  for (let i = 0; i < uncached.length; i += IMAGE_BATCH_SIZE) {
+    const batch = uncached.slice(i, i + IMAGE_BATCH_SIZE);
+    const idsStr = batch.join(',');
+
     const url = isLocalDev()
       ? `/api/figma/file/${fileKey}/images?ids=${encodeURIComponent(idsStr)}&format=${format}&scale=${scale}`
       : `${FIGMA_API}/images/${fileKey}?ids=${encodeURIComponent(idsStr)}&format=${format}&scale=${scale}`;
 
-    const res = await fetchWithRetry(url, {
-      headers: { 'X-Figma-Token': token },
-    });
-    return res.json();
-  }
-
-  // For larger batches, use staggered endpoint (local) or sequential (prod)
-  if (isLocalDev()) {
-    const res = await fetchWithRetry(`/api/figma/file/${fileKey}/images-staggered`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Figma-Token': token,
-      },
-      body: JSON.stringify({ ids, format, scale }),
-    });
-    return res.json();
-  }
-
-  // Production: fetch one at a time with stagger
-  const images = {};
-  for (let i = 0; i < ids.length; i++) {
-    if (i > 0) await sleep(IMAGE_STAGGER_MS);
     try {
-      const url = `${FIGMA_API}/images/${fileKey}?ids=${encodeURIComponent(ids[i])}&format=${format}&scale=${scale}`;
       const res = await fetchWithRetry(url, { headers: { 'X-Figma-Token': token } });
       const data = await res.json();
-      if (data.images) Object.assign(images, data.images);
+
+      if (data.images) {
+        for (const [nodeId, imgUrl] of Object.entries(data.images)) {
+          allImages[nodeId] = imgUrl;
+          if (imgUrl) imageCacheSet(nodeId, imgUrl);
+        }
+      }
     } catch (err) {
-      console.warn(`Image fetch failed for ${ids[i]}:`, err.message);
-      images[ids[i]] = null;
+      console.warn(`Batch image fetch failed:`, err.message);
+      // Fill failed batch with null
+      for (const nodeId of batch) {
+        if (!allImages[nodeId]) allImages[nodeId] = null;
+      }
+    }
+
+    loaded += batch.length;
+    if (onProgress) onProgress(loaded, total);
+
+    // Delay between batches (skip after last batch)
+    if (i + IMAGE_BATCH_SIZE < uncached.length) {
+      await sleep(BATCH_DELAY_MS);
     }
   }
-  return { images };
+
+  return { images: allImages };
 }
 
 /**
- * Fetch a single node's rendered image.
+ * Fetch a single node image (for comparison preview).
+ * Uses scale=1 for speed, checks cache.
  */
-export async function fetchNodeImage(fileKey, token, nodeId, format = 'png', scale = '2') {
+export async function fetchNodeImage(fileKey, token, nodeId, format = 'png', scale = '1') {
+  const cached = imageCacheGet(nodeId);
+  if (cached) return cached;
+
   const url = isLocalDev()
     ? `/api/figma/file/${fileKey}/images?ids=${encodeURIComponent(nodeId)}&format=${format}&scale=${scale}`
     : `${FIGMA_API}/images/${fileKey}?ids=${encodeURIComponent(nodeId)}&format=${format}&scale=${scale}`;
@@ -195,7 +230,9 @@ export async function fetchNodeImage(fileKey, token, nodeId, format = 'png', sca
   try {
     const res = await fetchWithRetry(url, { headers: { 'X-Figma-Token': token } });
     const data = await res.json();
-    return data.images?.[nodeId] || null;
+    const imgUrl = data.images?.[nodeId] || null;
+    if (imgUrl) imageCacheSet(nodeId, imgUrl);
+    return imgUrl;
   } catch {
     return null;
   }

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { generateCSS, generateHTML } from '../lib/cssGenerator';
-import { fetchFigmaImages } from '../lib/figmaApi';
+import { fetchFigmaImages, fetchNodeImage } from '../lib/figmaApi';
 import '../styles/CSSOutput.css';
 
 const DEVICES = {
@@ -28,7 +28,6 @@ export default function CSSOutput({ fileData, selectedNodes, settings, imageAsse
   const [overlayOpacity, setOverlayOpacity] = useState(50);
   const [figmaImageUrl, setFigmaImageUrl] = useState(null);
   const [figmaImageLoading, setFigmaImageLoading] = useState(false);
-  const figmaImageCache = useRef({}); // cache: nodeId → imageUrl
 
   const previewIframeRef = useRef(null);
   const compareIframeRef = useRef(null);
@@ -159,22 +158,13 @@ ${bodyHTML}
     }
   }, [activeTab, compareMode, previewHTML]);
 
-  // Fetch Figma render for compare (with caching)
+  // Fetch Figma render for compare — uses scale=1 for speed, caches in sessionStorage
   const fetchFigmaImage = useCallback(async () => {
     if (!token || !fileKey || !selectedNodes[activeFrame]) { setFigmaImageUrl(null); return; }
-    const nodeId = selectedNodes[activeFrame].id;
-
-    // Return cached image if available
-    if (figmaImageCache.current[nodeId]) {
-      setFigmaImageUrl(figmaImageCache.current[nodeId]);
-      return;
-    }
-
     setFigmaImageLoading(true);
     try {
-      const data = await fetchFigmaImages(fileKey, token, [nodeId], 'png', '2');
-      const url = data.images?.[nodeId] || null;
-      if (url) figmaImageCache.current[nodeId] = url;
+      const nodeId = selectedNodes[activeFrame].id;
+      const url = await fetchNodeImage(fileKey, token, nodeId, 'png', '1');
       setFigmaImageUrl(url);
     } catch { setFigmaImageUrl(null); }
     finally { setFigmaImageLoading(false); }

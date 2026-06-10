@@ -103,6 +103,7 @@ export default function AssetSelector({
   const [activeSection, setActiveSection] = useState('fonts');
   const [imageLoading, setImageLoading] = useState(false);
   const [imageError, setImageError] = useState('');
+  const [imageProgress, setImageProgress] = useState({ loaded: 0, total: 0 });
 
   // Detect fonts
   useEffect(() => {
@@ -112,7 +113,7 @@ export default function AssetSelector({
     }
   }, [fileData, selectedNodes]);
 
-  // Detect and fetch images
+  // Detect and fetch images (batched, fast)
   const fetchImages = useCallback(async () => {
     if (!fileData || selectedNodes.length === 0) return;
     const imageNodes = findImageNodes(fileData.document, selectedNodes);
@@ -123,9 +124,15 @@ export default function AssetSelector({
 
     setImageLoading(true);
     setImageError('');
+    setImageProgress({ loaded: 0, total: imageNodes.length });
+
     try {
       const nodeIds = imageNodes.map((n) => n.nodeId);
-      const data = await fetchFigmaImages(fileKey, token, nodeIds, 'png', '2');
+      const data = await fetchFigmaImages(fileKey, token, nodeIds, {
+        format: 'png',
+        scale: '2',
+        onProgress: (loaded, total) => setImageProgress({ loaded, total }),
+      });
       const assets = imageNodes.map((node) => ({
         ...node,
         url: data.images?.[node.nodeId] || null,
@@ -267,7 +274,12 @@ export default function AssetSelector({
           {imageLoading ? (
             <div className="asset-loading">
               <span className="spinner"></span>
-              <p>Fetching images from Figma…</p>
+              <p>Loading images: {imageProgress.loaded}/{imageProgress.total}</p>
+              {imageProgress.total > 0 && (
+                <div className="progress-bar">
+                  <div className="progress-fill" style={{ width: `${(imageProgress.loaded / imageProgress.total) * 100}%` }} />
+                </div>
+              )}
             </div>
           ) : imageAssets.length === 0 ? (
             <div className="asset-empty">
