@@ -1,20 +1,20 @@
 /**
- * Figma Node → CSS Generator
+ * Figma Node → CSS/HTML Generator
  *
- * Converts Figma node trees into CSS that replicates the design pixel-accurately.
+ * Converts Figma node trees into CSS and HTML that replicate the design.
  *
  * Key positioning rules:
- * 1. Auto-layout frames → display:flex with gap, padding, alignment
- * 2. Children of auto-layout → flex items (width/height from bbox, flex-grow from layoutGrow)
- * 3. Non-auto-layout frames → position:relative container
- * 4. Children of non-auto-layout → position:absolute with top/left computed from parent bbox
- * 5. Constraints (LEFT, RIGHT, CENTER, SCALE, TOP_BOTTOM, etc.) map to CSS positioning
+ * 1. ALWAYS check layoutMode first. If present and not 'NONE', use flexbox.
+ * 2. Auto-layout frames → display:flex with direction, gap, padding, alignment
+ * 3. Children of auto-layout → flex items (width/height from bbox, flex-grow, align-self)
+ * 4. ONLY use position:absolute for children of NON-auto-layout parents
+ * 5. For absolute children: top/left = child.absoluteBoundingBox - parent.absoluteBoundingBox
+ * 6. Constraints (LEFT, RIGHT, CENTER, LEFT_RIGHT, TOP, BOTTOM, TOP_BOTTOM, SCALE)
  *
- * CSS and HTML share the same nodeToClassName() function (ID-based, deterministic)
- * so selectors and class attributes always correspond exactly.
+ * CSS and HTML share the same nodeToClassName() function so selectors always match.
  */
 
-// ─── NAMING ────────────────────────────────────────────────────────────────
+// ─── NAMING (DETERMINISTIC) ───────────────────────────────────────────────
 
 function sanitize(str) {
   return str
@@ -24,7 +24,7 @@ function sanitize(str) {
     .replace(/^(\d)/, '_$1') || 'layer';
 }
 
-function nodeToClassName(node, prefix = '') {
+export function nodeToClassName(node, prefix = '') {
   const base = sanitize(node.name);
   const idSuffix = node.id.replace(/[^a-zA-Z0-9]/g, '');
   return `${prefix}${base}_${idSuffix}`;
@@ -94,13 +94,22 @@ function hasAutoLayout(node) {
   return node && node.layoutMode && node.layoutMode !== 'NONE';
 }
 
+// ─── ASPECT RATIO ──────────────────────────────────────────────────────────
+
+function computeAspectRatio(w, h) {
+  if (!w || !h || w <= 0 || h <= 0) return null;
+  // Check for clean ratios up to 20
+  for (let denom = 1; denom <= 20; denom++) {
+    const numer = (w / h) * denom;
+    if (Math.abs(numer - Math.round(numer)) < 0.01) {
+      return `${Math.round(numer)} / ${denom}`;
+    }
+  }
+  return null;
+}
+
 // ─── CONSTRAINT-BASED POSITIONING ──────────────────────────────────────────
 
-/**
- * For children of non-auto-layout frames, Figma uses constraints to define
- * how elements are positioned relative to their parent. We convert these
- * to CSS positioning properties.
- */
 function applyConstraints(props, node, parentBBox) {
   const bbox = node.absoluteBoundingBox;
   if (!bbox || !parentBBox) return;
@@ -130,17 +139,15 @@ function applyConstraints(props, node, parentBBox) {
       props['width'] = `${nodeW}px`;
       break;
     case 'CENTER':
-      // Center horizontally
-      props['left'] = `${left}px`;
+      props['left'] = '50%';
+      props['transform'] = `translateX(-50%)`;
       props['width'] = `${nodeW}px`;
       break;
     case 'LEFT_RIGHT':
-      // Stretch: pin both sides
       props['left'] = `${left}px`;
       props['right'] = `${right}px`;
       break;
     case 'SCALE':
-      // Percentage-based
       props['left'] = `${((left / parentW) * 100).toFixed(2)}%`;
       props['width'] = `${((nodeW / parentW) * 100).toFixed(2)}%`;
       break;
@@ -160,7 +167,13 @@ function applyConstraints(props, node, parentBBox) {
       if (!props['height']) props['height'] = `${nodeH}px`;
       break;
     case 'CENTER':
-      props['top'] = `${top}px`;
+      props['top'] = '50%';
+      // Combine with horizontal center transform if present
+      if (props['transform'] && props['transform'].includes('translateX')) {
+        props['transform'] = 'translate(-50%, -50%)';
+      } else {
+        props['transform'] = 'translateY(-50%)';
+      }
       if (!props['height']) props['height'] = `${nodeH}px`;
       break;
     case 'TOP_BOTTOM':
@@ -177,9 +190,45 @@ function applyConstraints(props, node, parentBBox) {
   }
 }
 
+// ─── IMAGE FILL HELPER ─────────────────────────────────────────────────────
+
+function applyImageBackground(props, url, node) {
+  const imageFill = node.fills?.find((f) => f.type === 'IMAGE' && f.visible !== false);
+  const scaleMode = imageFill?.scaleMode || 'FILL';
+
+  props['background-image'] = `url('${url}')`;
+  props['background-repeat'] = 'no-repeat';
+
+  switch (scaleMode) {
+    case 'FILL':
+      props['background-size'] = 'cover';
+      props['background-position'] = 'center';
+      break;
+    case 'FIT':
+      props['background-size'] = 'contain';
+      props['background-position'] = 'center';
+      break;
+    case 'CROP':
+      props['background-size'] = 'cover';
+      props['background-position'] = 'center';
+      break;
+    case 'TILE':
+      props['background-size'] = 'auto';
+      props['background-repeat'] = 'repeat';
+      break;
+    default:
+      props['background-size'] = 'cover';
+      props['background-position'] = 'center';
+  }
+
+  // Image takes priority over solid fills
+  delete props['background-color'];
+  delete props['background'];
+}
+
 // ─── CSS GENERATION FOR A SINGLE NODE ──────────────────────────────────────
 
-function generateNodeCSS(node, settings, context) {
+function generateNodeCSS(node, settings, context, imageMap) {
   const { parentNode, parentBBox, isRootSelected } = context;
   const props = {};
   const bbox = node.absoluteBoundingBox;
@@ -188,7 +237,7 @@ function generateNodeCSS(node, settings, context) {
   // ═══ POSITIONING & DIMENSIONS ═══
 
   if (isRootSelected) {
-    // Root: explicit size, position:relative if not auto-layout
+    // Root selected node: explicit size
     if (settings.includeDimensions && bbox) {
       props['width'] = `${Math.round(bbox.width)}px`;
       props['height'] = `${Math.round(bbox.height)}px`;
@@ -200,14 +249,12 @@ function generateNodeCSS(node, settings, context) {
     // ─── FLEX CHILD ───
     const layoutGrow = node.layoutGrow ?? 0;
     const layoutAlign = node.layoutAlign || 'INHERIT';
-    const parentDir = parentNode.layoutMode; // HORIZONTAL or VERTICAL
+    const parentDir = parentNode.layoutMode;
 
     if (settings.includeDimensions && bbox) {
       const w = Math.round(bbox.width);
       const h = Math.round(bbox.height);
 
-      // Always set both width and height for accurate sizing
-      // Flex layout will override as needed
       if (parentDir === 'HORIZONTAL') {
         if (layoutGrow === 1) {
           props['flex'] = '1';
@@ -220,6 +267,7 @@ function generateNodeCSS(node, settings, context) {
           props['height'] = `${h}px`;
         }
       } else {
+        // VERTICAL
         if (layoutGrow === 1) {
           props['flex'] = '1';
         } else {
@@ -232,8 +280,7 @@ function generateNodeCSS(node, settings, context) {
         }
       }
 
-      // For flex children that don't grow but need both dimensions
-      // (e.g. an icon or image inside a row)
+      // Ensure both dimensions are set for non-growing, non-stretching items
       if (layoutGrow !== 1 && layoutAlign !== 'STRETCH') {
         if (!props['width']) props['width'] = `${w}px`;
         if (!props['height']) props['height'] = `${h}px`;
@@ -250,9 +297,9 @@ function generateNodeCSS(node, settings, context) {
     }
   }
 
-  // ═══ FLEX LAYOUT (if this node is an auto-layout container) ═══
+  // ═══ FLEX LAYOUT (if this node IS an auto-layout container) ═══
 
-  if (settings.layoutMethod === 'flexbox' && hasAutoLayout(node)) {
+  if (hasAutoLayout(node)) {
     props['display'] = 'flex';
     props['flex-direction'] = node.layoutMode === 'HORIZONTAL' ? 'row' : 'column';
 
@@ -283,21 +330,19 @@ function generateNodeCSS(node, settings, context) {
     if (node.layoutWrap === 'WRAP') {
       props['flex-wrap'] = 'wrap';
     }
-  } else if (!isRootSelected && !parentIsAutoLayout && node.children && node.children.length > 0) {
-    // Non-auto-layout frame that has children needs position:relative
-    // (it's already position:absolute from the block above, which establishes
-    // a containing block, so we don't need to add relative again)
-  } else if (isRootSelected && !hasAutoLayout(node)) {
-    // Already handled
-  }
-
-  // If this node has children but no auto-layout, it needs to be a
-  // positioning context for its absolutely-positioned children.
-  // position:absolute already creates a containing block, so we only
-  // need to add position:relative when the node doesn't already have position set.
-  if (!hasAutoLayout(node) && node.children && node.children.length > 0) {
+  } else if (node.children && node.children.length > 0) {
+    // Non-auto-layout frame with children → positioning context
     if (!props['position']) {
       props['position'] = 'relative';
+    }
+  }
+
+  // ═══ ASPECT RATIO ═══
+
+  if (bbox && settings.includeDimensions) {
+    const ratio = computeAspectRatio(Math.round(bbox.width), Math.round(bbox.height));
+    if (ratio) {
+      props['aspect-ratio'] = ratio;
     }
   }
 
@@ -306,15 +351,24 @@ function generateNodeCSS(node, settings, context) {
   if (node.fills && node.fills.length > 0) {
     const visibleFills = node.fills.filter((f) => f.visible !== false);
     if (visibleFills.length > 0) {
-      const bgValues = visibleFills.map(paintToBackground).filter(Boolean);
-      if (bgValues.length === 1) {
-        if (bgValues[0].includes('gradient')) {
-          props['background'] = bgValues[0];
-        } else {
-          props['background-color'] = bgValues[0];
+      // Check for IMAGE fills with imageMap entry
+      const hasImageFill = visibleFills.some((f) => f.type === 'IMAGE');
+      if (hasImageFill && imageMap && imageMap.has(node.id)) {
+        applyImageBackground(props, imageMap.get(node.id), node);
+      } else {
+        const bgValues = visibleFills
+          .filter((f) => f.type !== 'IMAGE')
+          .map(paintToBackground)
+          .filter(Boolean);
+        if (bgValues.length === 1) {
+          if (bgValues[0].includes('gradient')) {
+            props['background'] = bgValues[0];
+          } else {
+            props['background-color'] = bgValues[0];
+          }
+        } else if (bgValues.length > 1) {
+          props['background'] = bgValues.join(', ');
         }
-      } else if (bgValues.length > 1) {
-        props['background'] = bgValues.join(', ');
       }
     }
   }
@@ -346,7 +400,6 @@ function generateNodeCSS(node, settings, context) {
   // ═══ BORDER RADIUS ═══
 
   if (node.type === 'ELLIPSE') {
-    // Ellipses are always fully rounded
     props['border-radius'] = '50%';
   } else if (node.cornerRadius != null && node.cornerRadius > 0) {
     props['border-radius'] = `${node.cornerRadius}px`;
@@ -361,7 +414,6 @@ function generateNodeCSS(node, settings, context) {
 
   // ═══ SHAPE-SPECIFIC STYLES ═══
 
-  // Regular polygons (triangles, hexagons, etc.) use clip-path
   if (node.type === 'REGULAR_POLYGON') {
     const pointCount = node.pointCount || 3;
     const points = [];
@@ -374,10 +426,9 @@ function generateNodeCSS(node, settings, context) {
     props['clip-path'] = `polygon(${points.join(', ')})`;
   }
 
-  // Stars use clip-path
   if (node.type === 'STAR') {
     const pointCount = node.pointCount || 5;
-    const innerRadius = node.innerRadius || 0.382; // Figma default
+    const innerRadius = node.innerRadius || 0.382;
     const points = [];
     for (let i = 0; i < pointCount * 2; i++) {
       const angle = (i * Math.PI) / pointCount - Math.PI / 2;
@@ -389,9 +440,7 @@ function generateNodeCSS(node, settings, context) {
     props['clip-path'] = `polygon(${points.join(', ')})`;
   }
 
-  // Lines
   if (node.type === 'LINE') {
-    // A line is essentially a thin rectangle
     if (!props['height'] || props['height'] === '0px') {
       props['height'] = '1px';
     }
@@ -403,14 +452,16 @@ function generateNodeCSS(node, settings, context) {
     }
   }
 
-  // Vectors — just render as a box with their fill (best CSS can do)
-  // The actual vector path can't be represented in CSS
-
   // ═══ ROTATION ═══
 
   if (node.rotation && node.rotation !== 0) {
-    // Figma rotation is in degrees, counter-clockwise
-    props['transform'] = `rotate(${(-node.rotation).toFixed(1)}deg)`;
+    const rotateValue = `rotate(${(-node.rotation).toFixed(1)}deg)`;
+    // Merge with existing transform (from constraints CENTER)
+    if (props['transform'] && !props['transform'].includes('rotate')) {
+      props['transform'] += ` ${rotateValue}`;
+    } else if (!props['transform']) {
+      props['transform'] = rotateValue;
+    }
   }
 
   // ═══ EFFECTS ═══
@@ -547,15 +598,7 @@ function generateRecursive(node, settings, parentSelector, parentNode, parentBBo
   const selector = parentSelector ? `${parentSelector} > .${className}` : `.${className}`;
 
   const context = { parentNode, parentBBox, isRootSelected };
-  const cssProps = generateNodeCSS(node, settings, context);
-
-  // Add background-image for nodes with IMAGE fills that are in imageMap
-  if (imageMap && imageMap.has(node.id)) {
-    const imgUrl = imageMap.get(node.id);
-    if (imgUrl) {
-      props_addImageBg(cssProps, imgUrl, node);
-    }
-  }
+  const cssProps = generateNodeCSS(node, settings, context, imageMap);
 
   let rules = [];
 
@@ -576,43 +619,7 @@ function generateRecursive(node, settings, parentSelector, parentNode, parentBBo
   return rules;
 }
 
-/**
- * Add background-image CSS for image fills.
- */
-function props_addImageBg(props, url, node) {
-  // Determine how the image should be rendered
-  const imageFill = node.fills?.find((f) => f.type === 'IMAGE' && f.visible !== false);
-  const scaleMode = imageFill?.scaleMode || 'FILL';
-
-  props['background-image'] = `url('${url}')`;
-  props['background-repeat'] = 'no-repeat';
-
-  switch (scaleMode) {
-    case 'FILL':
-      props['background-size'] = 'cover';
-      props['background-position'] = 'center';
-      break;
-    case 'FIT':
-      props['background-size'] = 'contain';
-      props['background-position'] = 'center';
-      break;
-    case 'CROP':
-      props['background-size'] = 'cover';
-      props['background-position'] = 'center';
-      break;
-    case 'TILE':
-      props['background-size'] = 'auto';
-      props['background-repeat'] = 'repeat';
-      break;
-    default:
-      props['background-size'] = 'cover';
-      props['background-position'] = 'center';
-  }
-
-  // Remove solid background-color if image is present (image takes priority)
-  delete props['background-color'];
-  delete props['background'];
-}
+// ─── FORMAT CSS OUTPUT ─────────────────────────────────────────────────────
 
 function formatCSS(rules) {
   return rules
@@ -625,13 +632,33 @@ function formatCSS(rules) {
     .join('\n\n');
 }
 
+// ─── TREE SEARCH ───────────────────────────────────────────────────────────
+
+function findNode(node, id) {
+  if (node.id === id) return node;
+  if (node.children) {
+    for (const child of node.children) {
+      const found = findNode(child, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 // ─── PUBLIC API ────────────────────────────────────────────────────────────
 
+/**
+ * Generate CSS for selected Figma nodes.
+ *
+ * 1. Builds imageMap from imageAssets
+ * 2. Finds selected nodes in document tree
+ * 3. For each, calls generateRecursive to walk the tree
+ * 4. Outputs CSS with optional :root variables block
+ */
 export function generateCSS(fileData, selectedNodeIds, settings, imageAssets = []) {
   const allRules = [];
-  const variables = { colors: new Map(), fonts: new Set() };
 
-  // Build a map of nodeId → imageUrl for included images
+  // Build imageMap: nodeId → imageUrl
   const imageMap = new Map();
   imageAssets.forEach((asset) => {
     if (asset.included && asset.url) {
@@ -639,34 +666,27 @@ export function generateCSS(fileData, selectedNodeIds, settings, imageAssets = [
     }
   });
 
-  function findNode(node, id) {
-    if (node.id === id) return node;
-    if (node.children) {
-      for (const child of node.children) {
-        const found = findNode(child, id);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-
+  // Find selected nodes in document tree
   const selectedNodes = selectedNodeIds
     .map((sel) => findNode(fileData.document, sel.id))
     .filter(Boolean);
 
+  // Extract variables if enabled
+  let variables = { colors: new Map(), fonts: new Set() };
   if (settings.includeVariables) {
-    const vars = extractVariables(selectedNodes);
-    variables.colors = vars.colors;
-    variables.fonts = vars.fonts;
+    variables = extractVariables(selectedNodes);
   }
 
+  // Generate CSS rules for each selected node tree
   selectedNodes.forEach((node) => {
     const rules = generateRecursive(node, settings, '', null, null, true, imageMap);
     allRules.push(...rules);
   });
 
+  // Build output
   let output = '';
 
+  // Optional :root variables block
   if (settings.includeVariables && (variables.colors.size > 0 || variables.fonts.size > 0)) {
     let varsBlock = ':root {\n';
     variables.colors.forEach((varName, colorValue) => {
@@ -687,8 +707,11 @@ export function generateCSS(fileData, selectedNodeIds, settings, imageAssets = [
 
 /**
  * Generate HTML mirroring the Figma layer hierarchy.
- * Uses the same nodeToClassName() so classes always match CSS selectors.
- * Inserts <img> tags for nodes that have included image assets.
+ *
+ * 1. Uses same nodeToClassName for class names (ensures CSS/HTML match)
+ * 2. Outputs nested divs matching the Figma layer tree
+ * 3. TEXT nodes become <p> tags with their characters content
+ * 4. Image nodes get <img> tags when they have imageMap entries
  */
 export function generateHTML(fileData, selectedNodeIds, settings, imageAssets = []) {
   // Build image map
@@ -699,17 +722,6 @@ export function generateHTML(fileData, selectedNodeIds, settings, imageAssets = 
     }
   });
 
-  function findNode(node, id) {
-    if (node.id === id) return node;
-    if (node.children) {
-      for (const child of node.children) {
-        const found = findNode(child, id);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-
   const prefix = settings.namingMode === 'custom' ? settings.customPrefix : '';
 
   function buildHTML(node, depth = 0) {
@@ -719,22 +731,24 @@ export function generateHTML(fileData, selectedNodeIds, settings, imageAssets = 
     const indent = '  '.repeat(depth);
     const hasImage = imageMap.has(node.id);
 
+    // TEXT nodes → <p> tags
     if (node.type === 'TEXT') {
       const text = node.characters || node.name || '';
       return `${indent}<p class="${className}">${text}</p>\n`;
     }
 
-    // Leaf node with image → render as div (background-image handled by CSS)
-    // If user prefers <img> tag for accessibility, we add one inside
+    // Leaf node with image → <img> tag inside div
     if (hasImage && (!node.children || node.children.length === 0)) {
       const imgUrl = imageMap.get(node.id);
-      return `${indent}<div class="${className}">\n${indent}  <img src="${imgUrl}" alt="${node.name}" style="width:100%;height:100%;object-fit:cover;display:block;" />\n${indent}</div>\n`;
+      return `${indent}<div class="${className}">\n${indent}  <img src="${imgUrl}" alt="${node.name}" />\n${indent}</div>\n`;
     }
 
+    // Leaf node without children
     if (!node.children || node.children.length === 0) {
       return `${indent}<div class="${className}"></div>\n`;
     }
 
+    // Container with children
     let html = `${indent}<div class="${className}">\n`;
     node.children.forEach((child) => {
       if (child.visible === false) return;
