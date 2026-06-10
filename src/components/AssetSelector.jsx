@@ -180,7 +180,10 @@ export default function AssetSelector({
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${asset.name.replace(/[^a-zA-Z0-9_-]/g, '-')}.png`;
+      // Use name + node ID suffix to ensure uniqueness (matches CSS class naming)
+      const safeName = asset.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-');
+      const idSuffix = asset.nodeId.replace(/[^a-zA-Z0-9]/g, '');
+      a.download = `${safeName}_${idSuffix}.png`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
