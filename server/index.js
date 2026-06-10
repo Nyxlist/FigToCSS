@@ -8,8 +8,8 @@ app.use(cors());
 app.use(express.json());
 
 // Helper: fetch with retry on 429 rate limit
-const MAX_RETRIES = 5;
-const BASE_DELAY_MS = 10000;
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 3000;
 
 async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
   for (let attempt = 0; attempt <= retries; attempt++) {

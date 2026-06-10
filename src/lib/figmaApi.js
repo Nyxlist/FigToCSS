@@ -10,8 +10,8 @@
  */
 
 const FIGMA_API = 'https://api.figma.com/v1';
-const MAX_RETRIES = 5;
-const BASE_DELAY_MS = 10000; // start with 10s delay on rate limit
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 3000; // 3s initial retry delay
 
 function isLocalDev() {
   return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -23,7 +23,7 @@ function delay(ms) {
 
 // Simple request queue to avoid firing multiple requests at once
 let requestQueue = Promise.resolve();
-const MIN_GAP_MS = 1500; // minimum 1.5s between requests
+const MIN_GAP_MS = 300; // 300ms between requests
 
 function enqueue(fn) {
   requestQueue = requestQueue.then(() => delay(MIN_GAP_MS)).then(fn);
@@ -55,7 +55,7 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
         const retryAfter = res.headers.get('Retry-After');
         const waitMs = retryAfter
           ? parseInt(retryAfter, 10) * 1000
-          : BASE_DELAY_MS * Math.pow(2, attempt); // 10s, 20s, 40s, 80s, 160s
+          : BASE_DELAY_MS * Math.pow(2, attempt); // 3s, 6s, 12s
         console.warn(`Rate limited (429). Retrying in ${Math.round(waitMs / 1000)}s... (attempt ${attempt + 1}/${retries})`);
         await delay(waitMs);
         continue;
