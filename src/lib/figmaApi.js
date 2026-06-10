@@ -5,17 +5,50 @@
  * In production (GitHub Pages): calls Figma API directly from the browser.
  * 
  * The user's personal access token is stored in-memory only (never persisted).
+ * 
+ * Includes automatic retry with exponential backoff for rate-limited (429) responses.
  */
 
 const FIGMA_API = 'https://api.figma.com/v1';
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 2000; // start with 2s delay on rate limit
 
 function isLocalDev() {
   return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Wrapper around fetch that retries on 429 (rate limit) with exponential backoff.
+ */
+async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const res = await fetch(url, options);
+
+    if (res.status === 429) {
+      if (attempt >= retries) {
+        throw new Error('Rate limit exceeded. Please wait a minute and try again.');
+      }
+      // Use Retry-After header if available, otherwise exponential backoff
+      const retryAfter = res.headers.get('Retry-After');
+      const waitMs = retryAfter
+        ? parseInt(retryAfter, 10) * 1000
+        : BASE_DELAY_MS * Math.pow(2, attempt);
+      console.warn(`Rate limited (429). Retrying in ${waitMs}ms... (attempt ${attempt + 1}/${retries})`);
+      await delay(waitMs);
+      continue;
+    }
+
+    return res;
+  }
+}
+
 export async function fetchFigmaFile(fileKey, token) {
   if (isLocalDev()) {
-    const res = await fetch(`/api/figma/file/${fileKey}`, {
+    const res = await fetchWithRetry(`/api/figma/file/${fileKey}`, {
       headers: { 'X-Figma-Token': token },
     });
     if (!res.ok) {
@@ -26,7 +59,7 @@ export async function fetchFigmaFile(fileKey, token) {
   }
 
   // Direct call to Figma API (CORS allowed with token)
-  const res = await fetch(`${FIGMA_API}/files/${fileKey}`, {
+  const res = await fetchWithRetry(`${FIGMA_API}/files/${fileKey}`, {
     headers: { 'X-Figma-Token': token },
   });
   if (!res.ok) {
@@ -40,7 +73,7 @@ export async function fetchFigmaImages(fileKey, token, nodeIds, format = 'png', 
   const ids = Array.isArray(nodeIds) ? nodeIds.join(',') : nodeIds;
 
   if (isLocalDev()) {
-    const res = await fetch(
+    const res = await fetchWithRetry(
       `/api/figma/file/${fileKey}/images?ids=${encodeURIComponent(ids)}&format=${format}&scale=${scale}`,
       { headers: { 'X-Figma-Token': token } }
     );
@@ -48,7 +81,7 @@ export async function fetchFigmaImages(fileKey, token, nodeIds, format = 'png', 
     return res.json();
   }
 
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `${FIGMA_API}/images/${fileKey}?ids=${encodeURIComponent(ids)}&format=${format}&scale=${scale}`,
     { headers: { 'X-Figma-Token': token } }
   );
