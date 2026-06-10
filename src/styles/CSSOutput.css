@@ -103,13 +103,8 @@
   outline: 1px solid var(--color-primary);
 }
 
-.device-icon {
-  font-size: 14px;
-}
-
-.device-label {
-  font-weight: 500;
-}
+.device-icon { font-size: 14px; }
+.device-label { font-weight: 500; }
 
 .bg-switcher {
   display: flex;
@@ -126,10 +121,7 @@
   overflow: hidden;
 }
 
-.bg-btn:hover {
-  border-color: var(--color-text-muted);
-}
-
+.bg-btn:hover { border-color: var(--color-text-muted); }
 .bg-btn.active {
   border-color: var(--color-primary);
   box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
@@ -167,15 +159,8 @@
   color: var(--color-text);
 }
 
-.zoom-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
-.zoom-fit {
-  font-size: 14px;
-  margin-left: 2px;
-}
+.zoom-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.zoom-fit { font-size: 14px; margin-left: 2px; }
 
 .zoom-value {
   font-size: 12px;
@@ -186,10 +171,7 @@
 }
 
 /* Compare controls */
-.compare-controls {
-  display: flex;
-  gap: 4px;
-}
+.compare-controls { display: flex; gap: 4px; }
 
 .overlay-slider {
   display: flex;
@@ -224,7 +206,7 @@
   min-height: 500px;
 }
 
-/* Code view with line numbers */
+/* Code view */
 .code-container {
   display: flex;
   overflow: auto;
@@ -267,7 +249,12 @@
   flex: 1;
 }
 
-/* Preview stage — scrollable when zoomed in */
+/* ═══ PREVIEW STAGE ═══
+   The key insight: we do NOT use CSS transform for zoom.
+   Instead, the iframe is rendered at its real pixel size inside
+   a scrollable container. The "zoom" is applied via CSS zoom property
+   which DOES affect layout/scroll, unlike transform: scale().
+*/
 .preview-stage {
   height: 560px;
   overflow: auto;
@@ -275,21 +262,13 @@
   background-image:
     radial-gradient(circle at 1px 1px, #1e1e24 1px, transparent 0);
   background-size: 24px 24px;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 32px;
+  padding: 24px;
 }
 
 .preview-canvas {
-  transition: transform 0.2s ease;
   display: flex;
   justify-content: center;
-  flex-shrink: 0;
-}
-
-.preview-canvas.has-device-frame {
-  /* Let the device frame determine width */
+  min-width: min-content;
 }
 
 /* Device frames */
@@ -342,10 +321,9 @@
 
 .device-frame--tablet .device-frame__screen {
   border-radius: 12px;
-  overflow: auto;
 }
 
-/* Iframe styles */
+/* Iframe */
 .preview-iframe {
   border: none;
   display: block;
@@ -362,14 +340,13 @@
 .compare-wrapper {
   display: flex;
   justify-content: center;
-  flex-shrink: 0;
+  min-width: min-content;
 }
 
 .compare-side-by-side {
   display: flex;
   gap: 24px;
   align-items: flex-start;
-  flex-shrink: 0;
 }
 
 .compare-panel {
@@ -420,22 +397,9 @@
   max-width: 280px;
 }
 
-.placeholder-icon {
-  font-size: 40px;
-  display: block;
-  margin-bottom: 12px;
-}
-
-.placeholder-content p {
-  font-size: 13px;
-  color: var(--color-text-muted);
-  margin-bottom: 8px;
-}
-
-.placeholder-hint {
-  font-size: 11px;
-  opacity: 0.7;
-}
+.placeholder-icon { font-size: 40px; display: block; margin-bottom: 12px; }
+.placeholder-content p { font-size: 13px; color: var(--color-text-muted); margin-bottom: 8px; }
+.placeholder-hint { font-size: 11px; opacity: 0.7; }
 
 .placeholder-content .spinner {
   display: inline-block;
@@ -448,11 +412,9 @@
   margin-bottom: 12px;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
+@keyframes spin { to { transform: rotate(360deg); } }
 
-/* Overlay mode */
+/* Overlay */
 .compare-overlay {
   position: relative;
   flex-shrink: 0;

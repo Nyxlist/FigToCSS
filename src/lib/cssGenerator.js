@@ -198,10 +198,6 @@ function generateNodeCSS(node, settings, context) {
     }
   } else if (parentIsAutoLayout) {
     // ─── FLEX CHILD ───
-    // Children inside auto-layout are flex items. Figma gives them:
-    //   layoutGrow: 0 (fixed) or 1 (fill on primary axis)
-    //   layoutAlign: "STRETCH" (fill cross-axis) or "INHERIT" (fixed cross)
-    //   layoutSizingHorizontal / layoutSizingVertical: "FIXED", "FILL", "HUG"
     const layoutGrow = node.layoutGrow ?? 0;
     const layoutAlign = node.layoutAlign || 'INHERIT';
     const parentDir = parentNode.layoutMode; // HORIZONTAL or VERTICAL
@@ -210,32 +206,37 @@ function generateNodeCSS(node, settings, context) {
       const w = Math.round(bbox.width);
       const h = Math.round(bbox.height);
 
+      // Always set both width and height for accurate sizing
+      // Flex layout will override as needed
       if (parentDir === 'HORIZONTAL') {
-        // Primary axis = horizontal
         if (layoutGrow === 1) {
           props['flex'] = '1';
         } else {
           props['width'] = `${w}px`;
         }
-        // Cross axis = vertical
         if (layoutAlign === 'STRETCH') {
           props['align-self'] = 'stretch';
         } else {
           props['height'] = `${h}px`;
         }
       } else {
-        // Primary axis = vertical
         if (layoutGrow === 1) {
           props['flex'] = '1';
         } else {
           props['height'] = `${h}px`;
         }
-        // Cross axis = horizontal
         if (layoutAlign === 'STRETCH') {
           props['align-self'] = 'stretch';
         } else {
           props['width'] = `${w}px`;
         }
+      }
+
+      // For flex children that don't grow but need both dimensions
+      // (e.g. an icon or image inside a row)
+      if (layoutGrow !== 1 && layoutAlign !== 'STRETCH') {
+        if (!props['width']) props['width'] = `${w}px`;
+        if (!props['height']) props['height'] = `${h}px`;
       }
     }
   } else {
@@ -290,8 +291,10 @@ function generateNodeCSS(node, settings, context) {
     // Already handled
   }
 
-  // If this node has children but no auto-layout, and it's NOT already absolute,
-  // make it position:relative so its children can be absolute within it
+  // If this node has children but no auto-layout, it needs to be a
+  // positioning context for its absolutely-positioned children.
+  // position:absolute already creates a containing block, so we only
+  // need to add position:relative when the node doesn't already have position set.
   if (!hasAutoLayout(node) && node.children && node.children.length > 0) {
     if (!props['position']) {
       props['position'] = 'relative';

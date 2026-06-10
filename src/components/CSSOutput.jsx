@@ -373,7 +373,7 @@ ${bodyHTML}
           <div className="preview-stage" ref={stageRef}>
             <div
               className="preview-canvas"
-              style={{ transform: `scale(${effectiveZoom / 100})`, transformOrigin: 'top center' }}
+              style={{ zoom: effectiveZoom / 100 }}
             >
               {device !== 'desktop' ? (
                 <div className={`device-frame device-frame--${device}`}>
@@ -405,7 +405,7 @@ ${bodyHTML}
           <div className="preview-stage" ref={stageRef}>
             <div
               className="compare-wrapper"
-              style={{ transform: `scale(${effectiveZoom / 100})`, transformOrigin: 'top center' }}
+              style={{ zoom: effectiveZoom / 100 }}
             >
               {compareMode === 'side' && (
                 <div className="compare-side-by-side">
