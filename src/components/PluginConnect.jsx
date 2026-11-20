@@ -95,8 +95,8 @@ export default function PluginConnect({ onLoaded }) {
       <div className="connect-note">
         <strong>Install the plugin (once)</strong>
         <ol className="install-steps">
-          <li>Open the Figma desktop app.</li>
-          <li>Menu → Plugins → Development → Import plugin from manifest…</li>
+          <li>Open a design file in the Figma desktop app.</li>
+          <li>Press Ctrl + K (⌘ K on macOS), type <em>import plugin from manifest</em>, and press Enter.</li>
           <li>Choose <code>plugin/manifest.json</code> from this repository.</li>
           <li>Select layers, run <em>FigToCSS Exporter</em>, click <em>Export selection</em>, then download or copy.</li>
         </ol>

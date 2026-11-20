@@ -18,14 +18,17 @@ The Figma Plugin API has no rate limits, so this works on every plan and seat ty
 ### Install the plugin (once)
 
 1. Clone this repository (see [Setup](#setup)).
-2. Open the **Figma desktop app** (development plugins can't be imported in the browser).
-3. Menu → **Plugins → Development → Import plugin from manifest…**
-4. Choose `plugin/manifest.json` from this repository.
+2. Open the **Figma desktop app** (development plugins can't be imported in the browser). There is no official Linux app; use Windows/macOS or the unofficial [figma-linux](https://github.com/Figma-Linux/figma-linux) app.
+3. Open any **design file** (the option isn't available from the file browser).
+4. Press **Ctrl + K** (**⌘ K** on macOS; **Ctrl + /** in older Figma versions), type **import plugin from manifest**, and press Enter.
+   - Or click **Actions** in the bottom toolbar → **Plugins & widgets** → **Development** → **Import from manifest…**
+   - In the older Figma UI: Menu → **Plugins → Development → Import plugin from manifest…**
+5. Choose `plugin/manifest.json` from this repository.
 
 ### Export a design
 
 1. Select one or more layers (frames, components, …) on the current page.
-2. Run **Plugins → Development → FigToCSS Exporter**.
+2. Press **Ctrl + K** and search **FigToCSS Exporter** (or **Actions → Plugins & widgets → Development → FigToCSS Exporter**).
 3. Click **Export selection**, then **Download .figtocss.json** (or **Copy to clipboard**).
 4. In the web app, choose **Plugin export** and drop the file (or paste the JSON).
 
