@@ -1,23 +1,29 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { generateCSS, generateHTML } from '../lib/cssGenerator';
-import { fetchFigmaImages, fetchNodeImage } from '../lib/figmaApi';
+import { generateCSS, generateHTML } from '../lib/generator';
+import { getNodeIndex } from '../lib/nodeIndex';
+import { collectSvgNodes, exportAssetNames, makeAssetResolvers } from '../lib/assets';
+import { googleFontsUrl } from '../lib/fonts';
+import { buildZip } from '../lib/zipExport';
+import { sanitize } from '../lib/generator/naming';
+import PreviewToolbar, { DEVICES, BACKGROUNDS } from './PreviewToolbar';
+import ComparePane from './ComparePane';
+import CodeView from './CodeView';
 import '../styles/CSSOutput.css';
 
-const DEVICES = {
-  desktop: { label: 'Desktop', width: 1440, height: 900, icon: '🖥️' },
-  tablet: { label: 'Tablet', width: 768, height: 1024, icon: '📱' },
-  phone: { label: 'Phone', width: 375, height: 812, icon: '📲' },
-  phoneLandscape: { label: 'Phone ↔', width: 812, height: 375, icon: '📲' },
-};
+const CHECKER_BG = 'background-color: #fff; background-image: linear-gradient(45deg, #eee 25%, transparent 25%), linear-gradient(-45deg, #eee 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #eee 75%), linear-gradient(-45deg, transparent 75%, #eee 75%); background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;';
 
-const BACKGROUNDS = [
-  { label: 'Dark', value: '#1a1a1f' },
-  { label: 'Light', value: '#ffffff' },
-  { label: 'Gray', value: '#f3f4f6' },
-  { label: 'Checker', value: 'checker' },
-];
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
-export default function CSSOutput({ fileData, selectedNodes, settings, imageAssets, fontAssets, generatedCSS, setGeneratedCSS, token, fileKey, onBack }) {
+export default function CSSOutput({ fileData, selectedNodes, settings, source, imageAssets, fontAssets, fillUrls, onBack }) {
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState('preview');
   const [device, setDevice] = useState('desktop');
@@ -26,45 +32,14 @@ export default function CSSOutput({ fileData, selectedNodes, settings, imageAsse
   const [activeFrame, setActiveFrame] = useState(0); // which selected node to preview
   const [compareMode, setCompareMode] = useState('side');
   const [overlayOpacity, setOverlayOpacity] = useState(50);
-  const [figmaImageUrl, setFigmaImageUrl] = useState(null);
-  const [figmaImageLoading, setFigmaImageLoading] = useState(false);
+  const [zipState, setZipState] = useState({ busy: false, message: '', warning: false });
 
   const previewIframeRef = useRef(null);
-  const compareIframeRef = useRef(null);
   const stageRef = useRef(null);
 
-  // Font handling
-  const usedFonts = useMemo(() => {
-    if (!fontAssets || fontAssets.length === 0) return [];
-    return fontAssets.filter((f) => f.included).map((f) => f.family);
-  }, [fontAssets]);
-
-  const googleFontsUrl = useMemo(() => {
-    if (!fontAssets || fontAssets.length === 0) return '';
-    const googleFonts = fontAssets.filter((f) => f.included && f.isGoogleFont);
-    if (googleFonts.length === 0) return '';
-    const families = googleFonts
-      .map((f) => `family=${encodeURIComponent(f.family)}:wght@${f.weights ? f.weights.join(';') : '400;500;600;700'}`)
-      .join('&');
-    return `https://fonts.googleapis.com/css2?${families}&display=swap`;
-  }, [fontAssets]);
-
-  // Get bounds for the currently active frame
-  const activeNode = useMemo(() => {
-    if (!fileData || selectedNodes.length === 0) return null;
-    function findNode(node, id) {
-      if (node.id === id) return node;
-      if (node.children) {
-        for (const child of node.children) {
-          const found = findNode(child, id);
-          if (found) return found;
-        }
-      }
-      return null;
-    }
-    const sel = selectedNodes[activeFrame] || selectedNodes[0];
-    return sel ? findNode(fileData.document, sel.id) : null;
-  }, [fileData, selectedNodes, activeFrame]);
+  const fontsUrl = useMemo(() => googleFontsUrl(fontAssets), [fontAssets]);
+  const activeSel = selectedNodes[activeFrame] || selectedNodes[0];
+  const activeNode = activeSel ? getNodeIndex(fileData.document).get(activeSel.id) : null;
 
   const designBounds = useMemo(() => {
     if (!activeNode?.absoluteBoundingBox) return { width: 800, height: 600 };
@@ -74,15 +49,80 @@ export default function CSSOutput({ fileData, selectedNodes, settings, imageAsse
     };
   }, [activeNode]);
 
-  // Auto-fit zoom
+  // ─── Generation ───
+  const svgNodes = useMemo(
+    () => collectSvgNodes(fileData.document, selectedNodes, source),
+    [fileData, selectedNodes, source]
+  );
+  const exportResolvers = useMemo(() => {
+    const names = exportAssetNames(fileData.document, selectedNodes, source, imageAssets);
+    return makeAssetResolvers({ source, imageAssets, fillUrls, mode: 'export', names });
+  }, [fileData, selectedNodes, source, imageAssets, fillUrls]);
+  const previewResolvers = useMemo(
+    () => makeAssetResolvers({ source, imageAssets, fillUrls, mode: 'preview' }),
+    [source, imageAssets, fillUrls]
+  );
+  const hasImages = imageAssets.some((a) => a.included);
+  const hasFileAssets = svgNodes.length > 0 || hasImages;
+  let headerNote = '';
+  if (hasFileAssets) {
+    headerNote = 'Images live in an images/ folder next to this file (use "Download .zip" to get them).';
+    if (source.kind === 'api' && hasImages) {
+      headerNote += ' Image files are assumed to be .png here; the .zip uses the real file types.';
+    }
+  }
+
+  const generatedCSS = useMemo(() => generateCSS(fileData, selectedNodes, settings, {
+    ...exportResolvers,
+    fileName: source.fileName,
+    headerNote,
+  }), [fileData, selectedNodes, settings, exportResolvers, source.fileName, headerNote]);
+
+  const generatedHTML = useMemo(
+    () => generateHTML(fileData, selectedNodes, settings, exportResolvers),
+    [fileData, selectedNodes, settings, exportResolvers]
+  );
+
+  // Preview HTML for the ACTIVE FRAME only, with preview-mode URLs.
+  const previewHTML = useMemo(() => {
+    if (!activeSel) return '';
+    const single = [activeSel];
+    const options = { ...previewResolvers, fileName: source.fileName };
+    const bodyHTML = generateHTML(fileData, single, settings, options);
+    // Never let CSS text close the <style> element of the srcdoc.
+    const singleCSS = generateCSS(fileData, single, settings, options).replace(/<\//g, '<\\/');
+    const bgCSS = bgOption.value === 'checker' ? CHECKER_BG : `background-color: ${bgOption.value};`;
+
+    return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  ${fontsUrl ? `<link href="${fontsUrl}" rel="stylesheet" />` : ''}
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { margin: 0; padding: 0; ${bgCSS} }
+    body { overflow: hidden; }
+    p { margin: 0; }
+    ${singleCSS}
+  </style>
+</head>
+<body>
+${bodyHTML}
+</body>
+</html>`;
+  }, [fileData, activeSel, settings, previewResolvers, source.fileName, bgOption, fontsUrl]);
+
+  // ─── Zoom ───
   const calculateFitZoom = useCallback(() => {
     const stageEl = stageRef.current;
     if (!stageEl) return 50;
     const containerW = stageEl.clientWidth - 48;
     const containerH = stageEl.clientHeight - 48;
-    const currentDevice = DEVICES[device];
-    let contentW = device === 'desktop' ? designBounds.width : currentDevice.width;
-    let contentH = device === 'desktop' ? designBounds.height : currentDevice.height;
+    let contentW = device === 'desktop' ? designBounds.width : DEVICES[device].width;
+    const contentH = device === 'desktop' ? designBounds.height : DEVICES[device].height;
     if (activeTab === 'compare' && compareMode === 'side') contentW = contentW * 2 + 32;
     const scaleX = containerW / (contentW + 40);
     const scaleY = containerH / (contentH + 40);
@@ -94,104 +134,66 @@ export default function CSSOutput({ fileData, selectedNodes, settings, imageAsse
       const t = setTimeout(() => setZoom(calculateFitZoom()), 60);
       return () => clearTimeout(t);
     }
+    return undefined;
   }, [activeTab, device, compareMode, activeFrame, calculateFitZoom]);
 
   useEffect(() => {
-    if (activeTab !== 'preview' && activeTab !== 'compare') return;
+    if (activeTab !== 'preview' && activeTab !== 'compare') return undefined;
     const h = () => setZoom(calculateFitZoom());
     window.addEventListener('resize', h);
     return () => window.removeEventListener('resize', h);
   }, [activeTab, calculateFitZoom]);
 
-  // Generate CSS (for ALL selected nodes)
-  useEffect(() => {
-    if (fileData && selectedNodes.length > 0) {
-      const css = generateCSS(fileData, selectedNodes, settings, imageAssets || []);
-      setGeneratedCSS(css);
-    }
-  }, [fileData, selectedNodes, settings, imageAssets, setGeneratedCSS]);
-
-  // Generate preview HTML for the ACTIVE FRAME only
-  const previewHTML = useMemo(() => {
-    if (!fileData || !generatedCSS || !activeNode) return '';
-    const singleNode = [selectedNodes[activeFrame] || selectedNodes[0]];
-    const bodyHTML = generateHTML(fileData, singleNode, settings, imageAssets || []);
-    const singleCSS = generateCSS(fileData, singleNode, settings, imageAssets || []);
-
-    const bgCSS = bgOption.value === 'checker'
-      ? `background-color: #fff; background-image: linear-gradient(45deg, #eee 25%, transparent 25%), linear-gradient(-45deg, #eee 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #eee 75%), linear-gradient(-45deg, transparent 75%, #eee 75%); background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;`
-      : `background-color: ${bgOption.value};`;
-
-    return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  ${googleFontsUrl ? `<link href="${googleFontsUrl}" rel="stylesheet" />` : ''}
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { margin: 0; padding: 0; ${bgCSS} }
-    body { overflow: hidden; }
-    p { margin: 0; }
-    img { display: block; max-width: none; }
-    ${singleCSS}
-  </style>
-</head>
-<body>
-${bodyHTML}
-</body>
-</html>`;
-  }, [fileData, selectedNodes, activeFrame, activeNode, settings, imageAssets, generatedCSS, bgOption, googleFontsUrl]);
-
-  // Write to iframes
   useEffect(() => {
     if (activeTab === 'preview' && previewIframeRef.current && previewHTML) {
       previewIframeRef.current.srcdoc = previewHTML;
     }
   }, [activeTab, previewHTML]);
 
-  useEffect(() => {
-    if (activeTab === 'compare' && compareIframeRef.current && previewHTML) {
-      compareIframeRef.current.srcdoc = previewHTML;
-    }
-  }, [activeTab, compareMode, previewHTML]);
-
-  // Fetch Figma render for compare — uses scale=1 for speed, caches in sessionStorage
-  const fetchFigmaImage = useCallback(async () => {
-    if (!token || !fileKey || !selectedNodes[activeFrame]) { setFigmaImageUrl(null); return; }
-    setFigmaImageLoading(true);
-    try {
-      const nodeId = selectedNodes[activeFrame].id;
-      const url = await fetchNodeImage(fileKey, token, nodeId, 'png', '1');
-      setFigmaImageUrl(url);
-    } catch { setFigmaImageUrl(null); }
-    finally { setFigmaImageLoading(false); }
-  }, [token, fileKey, selectedNodes, activeFrame]);
-
-  useEffect(() => {
-    if (activeTab === 'compare') { setFigmaImageUrl(null); fetchFigmaImage(); }
-  }, [activeTab, activeFrame]);
-
-  // Actions
+  // ─── Actions ───
   const handleCopy = async () => {
-    try { await navigator.clipboard.writeText(generatedCSS); }
-    catch { /* fallback */ const t = document.createElement('textarea'); t.value = generatedCSS; document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t); }
-    setCopied(true); setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(generatedCSS);
+    } catch {
+      const t = document.createElement('textarea');
+      t.value = generatedCSS;
+      document.body.appendChild(t);
+      t.select();
+      document.execCommand('copy');
+      document.body.removeChild(t);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleDownload = () => {
-    const blob = new Blob([generatedCSS], { type: 'text/css' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'figma-styles.css';
-    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  const handleDownloadCSS = () => {
+    downloadBlob(new Blob([generatedCSS], { type: 'text/css' }), 'figma-styles.css');
   };
 
-  const lineCount = generatedCSS ? generatedCSS.split('\n').length : 0;
+  const handleDownloadZip = async () => {
+    setZipState({ busy: true, message: 'Building .zip…', warning: false });
+    try {
+      const { blob, warnings } = await buildZip({
+        fileData, selectedNodes, settings, source, imageAssets, fontAssets, fillUrls,
+      });
+      downloadBlob(blob, `${sanitize(source.fileName)}.zip`);
+      setZipState({
+        busy: false,
+        warning: warnings.length > 0,
+        message: warnings.length > 0
+          ? `Downloaded with ${warnings.length} warning${warnings.length !== 1 ? 's' : ''} (see README.txt in the zip).`
+          : '',
+      });
+    } catch (err) {
+      setZipState({ busy: false, message: `Could not build the zip: ${err.message}`, warning: true });
+    }
+  };
+
+  const lineCount = generatedCSS.split('\n').length;
   const effectiveZoom = zoom ?? 50;
   const iframeW = device === 'desktop' ? Math.round(designBounds.width) : DEVICES[device].width;
   const iframeH = device === 'desktop' ? Math.round(designBounds.height) : DEVICES[device].height;
+  const showStage = activeTab === 'preview' || activeTab === 'compare';
 
   return (
     <div className="css-output panel">
@@ -204,13 +206,19 @@ ${bodyHTML}
           </p>
         </div>
         <div className="output-actions">
-          <button className="btn btn-secondary" onClick={handleCopy}>{copied ? '✓ Copied' : '📋 Copy'}</button>
-          <button className="btn btn-primary" onClick={handleDownload}>⬇ Download CSS</button>
+          <button className="btn btn-secondary" onClick={handleCopy}>{copied ? '✓ Copied' : '📋 Copy CSS'}</button>
+          <button className="btn btn-secondary" onClick={handleDownloadCSS}>⬇ Download CSS</button>
+          <button className="btn btn-primary" onClick={handleDownloadZip} disabled={zipState.busy}>
+            {zipState.busy ? 'Building…' : '⬇ Download .zip'}
+          </button>
         </div>
       </div>
 
-      {/* Frame selector — shows when multiple frames are selected */}
-      {selectedNodes.length > 1 && (activeTab === 'preview' || activeTab === 'compare') && (
+      {zipState.message && (
+        <p className={`output-status ${zipState.warning ? 'warning' : ''}`}>{zipState.message}</p>
+      )}
+
+      {selectedNodes.length > 1 && showStage && (
         <div className="frame-selector">
           {selectedNodes.map((node, i) => (
             <button
@@ -224,7 +232,6 @@ ${bodyHTML}
         </div>
       )}
 
-      {/* Tabs */}
       <div className="output-tabs-row">
         <div className="output-tabs">
           <button className={`tab-btn ${activeTab === 'code' ? 'active' : ''}`} onClick={() => setActiveTab('code')}>{'</>'} Code</button>
@@ -232,60 +239,26 @@ ${bodyHTML}
           <button className={`tab-btn ${activeTab === 'compare' ? 'active' : ''}`} onClick={() => setActiveTab('compare')}>⚖ Compare</button>
         </div>
 
-        {(activeTab === 'preview' || activeTab === 'compare') && (
-          <div className="preview-toolbar">
-            <div className="device-switcher">
-              {Object.entries(DEVICES).map(([key, dev]) => (
-                <button key={key} className={`device-btn ${device === key ? 'active' : ''}`} onClick={() => setDevice(key)} title={dev.label}>
-                  <span className="device-icon">{dev.icon}</span><span className="device-label">{dev.label}</span>
-                </button>
-              ))}
-            </div>
-            <div className="toolbar-divider" />
-            <div className="bg-switcher">
-              {BACKGROUNDS.map((bg) => (
-                <button key={bg.label} className={`bg-btn ${bgOption.label === bg.label ? 'active' : ''}`} onClick={() => setBgOption(bg)} title={bg.label}>
-                  <span className="bg-swatch" style={{ background: bg.value === 'checker' ? 'repeating-conic-gradient(#808080 0% 25%, #b0b0b0 0% 50%) 50%/8px 8px' : bg.value }} />
-                </button>
-              ))}
-            </div>
-            <div className="toolbar-divider" />
-            <div className="zoom-controls">
-              <button className="zoom-btn" onClick={() => setZoom(z => Math.max(10, (z??50)-10))}>−</button>
-              <span className="zoom-value">{effectiveZoom}%</span>
-              <button className="zoom-btn" onClick={() => setZoom(z => Math.min(300, (z??50)+10))}>+</button>
-              <button className="zoom-btn zoom-fit" onClick={() => setZoom(calculateFitZoom())} title="Fit">⊡</button>
-            </div>
-            {activeTab === 'compare' && (
-              <>
-                <div className="toolbar-divider" />
-                <div className="compare-controls">
-                  <button className={`device-btn ${compareMode === 'side' ? 'active' : ''}`} onClick={() => setCompareMode('side')}>Side by Side</button>
-                  <button className={`device-btn ${compareMode === 'overlay' ? 'active' : ''}`} onClick={() => setCompareMode('overlay')}>Overlay</button>
-                </div>
-                {compareMode === 'overlay' && (
-                  <div className="overlay-slider">
-                    <span className="overlay-label">Figma</span>
-                    <input type="range" min="0" max="100" value={overlayOpacity} onChange={e => setOverlayOpacity(+e.target.value)} className="opacity-range" />
-                    <span className="overlay-value">{overlayOpacity}%</span>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
+        {showStage && (
+          <PreviewToolbar
+            device={device}
+            setDevice={setDevice}
+            bgOption={bgOption}
+            setBgOption={setBgOption}
+            zoom={effectiveZoom}
+            setZoom={setZoom}
+            onFit={() => setZoom(calculateFitZoom())}
+            showCompare={activeTab === 'compare'}
+            compareMode={compareMode}
+            setCompareMode={setCompareMode}
+            overlayOpacity={overlayOpacity}
+            setOverlayOpacity={setOverlayOpacity}
+          />
         )}
       </div>
 
-      {/* Content */}
       <div className="output-content">
-        {activeTab === 'code' && (
-          <div className="code-container">
-            <div className="code-line-numbers" aria-hidden="true">
-              {generatedCSS && generatedCSS.split('\n').map((_, i) => <span key={i}>{i + 1}</span>)}
-            </div>
-            <pre className="css-code"><code>{generatedCSS || '/* No CSS generated */'}</code></pre>
-          </div>
-        )}
+        {activeTab === 'code' && <CodeView css={generatedCSS} html={generatedHTML} />}
 
         {activeTab === 'preview' && (
           <div className="preview-stage" ref={stageRef}>
@@ -301,31 +274,18 @@ ${bodyHTML}
           </div>
         )}
 
-        {activeTab === 'compare' && (
-          <div className="preview-stage" ref={stageRef}>
-            <div className="compare-wrapper" style={{ zoom: effectiveZoom / 100 }}>
-              {compareMode === 'side' && (
-                <div className="compare-side-by-side">
-                  <div className="compare-panel">
-                    <div className="compare-panel-label">CSS Output</div>
-                    <iframe ref={compareIframeRef} className="preview-iframe compare-iframe" title="CSS" sandbox="allow-same-origin" style={{ width: `${iframeW}px`, height: `${iframeH}px` }} />
-                  </div>
-                  <div className="compare-panel">
-                    <div className="compare-panel-label">Figma Design</div>
-                    {figmaImageLoading && <div className="compare-placeholder" style={{ width: iframeW, height: iframeH }}><div className="placeholder-content"><span className="spinner"></span><p>Loading…</p></div></div>}
-                    {!figmaImageLoading && figmaImageUrl && <img src={figmaImageUrl} alt="Figma" className="compare-figma-img" style={{ width: iframeW, height: iframeH }} />}
-                    {!figmaImageLoading && !figmaImageUrl && <div className="compare-placeholder" style={{ width: iframeW, height: iframeH }}><div className="placeholder-content"><span className="placeholder-icon">🎨</span><p>Unavailable</p></div></div>}
-                  </div>
-                </div>
-              )}
-              {compareMode === 'overlay' && (
-                <div className="compare-overlay" style={{ width: iframeW, height: iframeH }}>
-                  <iframe ref={compareIframeRef} className="preview-iframe compare-iframe overlay-base" title="CSS" sandbox="allow-same-origin" style={{ width: iframeW, height: iframeH }} />
-                  {figmaImageUrl && <img src={figmaImageUrl} alt="Figma" className="compare-figma-img overlay-top" style={{ width: iframeW, height: iframeH, opacity: overlayOpacity/100 }} />}
-                </div>
-              )}
-            </div>
-          </div>
+        {activeTab === 'compare' && activeSel && (
+          <ComparePane
+            source={source}
+            nodeId={activeSel.id}
+            previewHTML={previewHTML}
+            width={iframeW}
+            height={iframeH}
+            mode={compareMode}
+            overlayOpacity={overlayOpacity}
+            zoom={effectiveZoom}
+            stageRef={stageRef}
+          />
         )}
       </div>
 

@@ -1,0 +1,21 @@
+/* Code sub-tabs (CSS / HTML) */
+.code-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  background: #0a0a0e;
+  border-bottom: 1px solid #1e1e24;
+}
+
+.code-tab {
+  padding: 6px 12px;
+  border-radius: 4px 4px 0 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+
+.code-tab.active {
+  background: #0d0d10;
+  color: var(--color-text);
+}

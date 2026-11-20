@@ -481,3 +481,13 @@
   color: var(--color-text-muted);
   white-space: nowrap;
 }
+
+.output-status {
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.output-status.warning {
+  color: var(--color-warning);
+}

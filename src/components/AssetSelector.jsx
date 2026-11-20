@@ -1,202 +1,107 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { fetchFigmaImages } from '../lib/figmaApi';
+import React, { useCallback, useEffect, useState } from 'react';
+import { fetchImageFills } from '../lib/figmaApi';
+import { base64ToBytes, collectImageAssets, detectMime, exportAssetNames } from '../lib/assets';
+import { collectFonts, googleFontsUrl } from '../lib/fonts';
 import '../styles/AssetSelector.css';
 
-// Known Google Fonts (subset — most common ones)
-const GOOGLE_FONTS = new Set([
-  'Inter', 'Roboto', 'Open Sans', 'Lato', 'Montserrat', 'Poppins', 'Raleway',
-  'Nunito', 'Ubuntu', 'Merriweather', 'Playfair Display', 'Oswald', 'Source Sans Pro',
-  'Source Code Pro', 'Noto Sans', 'PT Sans', 'Work Sans', 'Manrope', 'DM Sans',
-  'Space Grotesk', 'JetBrains Mono', 'Fira Code', 'IBM Plex Sans', 'IBM Plex Mono',
-  'Rubik', 'Quicksand', 'Karla', 'Mulish', 'Inconsolata', 'Barlow', 'Cabin',
-  'Libre Franklin', 'Josefin Sans', 'Archivo', 'Overpass', 'Sora', 'Outfit',
-  'Plus Jakarta Sans', 'Lexend', 'Red Hat Display', 'Figtree', 'Geist',
-  'Albert Sans', 'Space Mono', 'Instrument Sans', 'Satoshi',
-]);
-
-function findFontsInSelection(document, selectedNodeIds) {
-  const fonts = new Map(); // family → { count, weights }
-
-  function findNode(node, id) {
-    if (node.id === id) return node;
-    if (node.children) {
-      for (const child of node.children) {
-        const found = findNode(child, id);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-
-  function traverse(node) {
-    if (node.style?.fontFamily) {
-      const family = node.style.fontFamily;
-      const weight = node.style.fontWeight || 400;
-      if (!fonts.has(family)) {
-        fonts.set(family, { count: 0, weights: new Set() });
-      }
-      const entry = fonts.get(family);
-      entry.count++;
-      entry.weights.add(weight);
-    }
-    if (node.children) node.children.forEach(traverse);
-  }
-
-  selectedNodeIds.forEach((sel) => {
-    const node = findNode(document, sel.id);
-    if (node) traverse(node);
-  });
-
-  return [...fonts.entries()].map(([family, { count, weights }]) => ({
-    family,
-    count,
-    weights: [...weights].sort((a, b) => a - b),
-    isGoogleFont: GOOGLE_FONTS.has(family),
-    included: true,
-  }));
-}
-
-function findImageNodes(document, selectedNodeIds) {
-  function findNode(node, id) {
-    if (node.id === id) return node;
-    if (node.children) {
-      for (const child of node.children) {
-        const found = findNode(child, id);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-
-  const imageNodes = [];
-  function traverse(node, path = '') {
-    const currentPath = path ? `${path} / ${node.name}` : node.name;
-    if (node.fills?.some((f) => f.type === 'IMAGE' && f.visible !== false)) {
-      imageNodes.push({
-        nodeId: node.id,
-        name: node.name,
-        path: currentPath,
-        width: node.absoluteBoundingBox?.width || 0,
-        height: node.absoluteBoundingBox?.height || 0,
-      });
-    }
-    if (node.children) {
-      node.children.forEach((child) => {
-        if (child.visible !== false) traverse(child, currentPath);
-      });
-    }
-  }
-
-  selectedNodeIds.forEach((sel) => {
-    const node = findNode(document, sel.id);
-    if (node) traverse(node);
-  });
-
-  return imageNodes;
+function triggerDownload(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export default function AssetSelector({
-  fileData, selectedNodes, token, fileKey,
-  imageAssets, setImageAssets, fontAssets, setFontAssets,
+  fileData, selectedNodes, selectionKey, source,
+  assets, setAssets, setImageAssets, setFontAssets,
+  fillUrls, setFillUrls,
   onContinue, onBack,
 }) {
   const [activeSection, setActiveSection] = useState('fonts');
-  const [imageLoading, setImageLoading] = useState(false);
-  const [imageError, setImageError] = useState('');
-  const [imageProgress, setImageProgress] = useState({ loaded: 0, total: 0 });
+  const [fillLoading, setFillLoading] = useState(false);
+  const [fillError, setFillError] = useState('');
 
-  // Detect fonts
+  const ready = assets.key === selectionKey;
+  const imageAssets = ready ? assets.images : [];
+  const fontAssets = ready ? assets.fonts : [];
+  const isApi = source.kind === 'api';
+
+  // Detect assets once per selection.
   useEffect(() => {
-    if (fileData && selectedNodes.length > 0 && fontAssets.length === 0) {
-      const fonts = findFontsInSelection(fileData.document, selectedNodes);
-      setFontAssets(fonts);
-    }
-  }, [fileData, selectedNodes]);
+    if (ready || !fileData) return;
+    setAssets({
+      key: selectionKey,
+      images: collectImageAssets(fileData.document, selectedNodes, source),
+      fonts: collectFonts(fileData.document, selectedNodes),
+    });
+  }, [ready, fileData, selectedNodes, selectionKey, source, setAssets]);
 
-  // Detect and fetch images (batched, fast)
-  const fetchImages = useCallback(async () => {
-    if (!fileData || selectedNodes.length === 0) return;
-    const imageNodes = findImageNodes(fileData.document, selectedNodes);
-    if (imageNodes.length === 0) {
-      setImageAssets([]);
-      return;
-    }
-
-    setImageLoading(true);
-    setImageError('');
-    setImageProgress({ loaded: 0, total: imageNodes.length });
-
+  // API source: one call to /files/:key/images (Tier 2) for all fill URLs.
+  const loadFills = useCallback(async () => {
+    setFillLoading(true);
+    setFillError('');
     try {
-      const nodeIds = imageNodes.map((n) => n.nodeId);
-      const data = await fetchFigmaImages(fileKey, token, nodeIds, {
-        format: 'png',
-        scale: '2',
-        onProgress: (loaded, total) => setImageProgress({ loaded, total }),
-      });
-      const assets = imageNodes.map((node) => ({
-        ...node,
-        url: data.images?.[node.nodeId] || null,
-        included: true,
-      }));
-      setImageAssets(assets);
+      const refs = imageAssets.map((a) => a.imageRef);
+      setFillUrls(await fetchImageFills(source.fileKey, source.token, source.version, refs));
     } catch (err) {
-      setImageError(err.message);
-      setImageAssets(imageNodes.map((n) => ({ ...n, url: null, included: true })));
+      setFillError(err.message);
     } finally {
-      setImageLoading(false);
+      setFillLoading(false);
     }
-  }, [fileData, selectedNodes, fileKey, token, setImageAssets]);
+  }, [source, imageAssets, setFillUrls]);
 
+  const needsFills = isApi && ready && imageAssets.length > 0 && !fillUrls && !fillError && !fillLoading;
   useEffect(() => {
-    if (imageAssets.length === 0) fetchImages();
-  }, []);
+    if (needsFills) loadFills();
+  }, [needsFills, loadFills]);
+
+  const previewUrl = (asset) => (isApi
+    ? fillUrls?.[asset.imageRef] || null
+    : source.imageUrls?.[asset.imageRef] || null);
 
   // Font actions
   const toggleFont = (family) => {
-    setFontAssets((prev) => prev.map((f) => f.family === family ? { ...f, included: !f.included } : f));
+    setFontAssets((prev) => prev.map((f) => (f.family === family ? { ...f, included: !f.included } : f)));
   };
 
-  const downloadFontCSS = () => {
-    const included = fontAssets.filter((f) => f.included && f.isGoogleFont);
-    if (included.length === 0) return;
-    const families = included.map((f) => {
-      const weights = f.weights.join(';');
-      return `family=${encodeURIComponent(f.family)}:wght@${weights}`;
-    }).join('&');
-    const url = `https://fonts.googleapis.com/css2?${families}&display=swap`;
-    window.open(url, '_blank');
+  const fontsUrl = googleFontsUrl(fontAssets);
+  const openFontCSS = () => {
+    if (fontsUrl) window.open(fontsUrl, '_blank', 'noopener');
   };
 
   // Image actions
-  const toggleImage = (nodeId) => {
-    setImageAssets((prev) => prev.map((img) => img.nodeId === nodeId ? { ...img, included: !img.included } : img));
+  const toggleImage = (imageRef) => {
+    setImageAssets((prev) => prev.map((img) => (img.imageRef === imageRef ? { ...img, included: !img.included } : img)));
   };
+
+  // Same names as the CSS and the zip (API: extension from the downloaded bytes, like the zip).
+  const fileNameFor = (imageRef, mime) => exportAssetNames(
+    fileData.document, selectedNodes, source, imageAssets, mime ? { [imageRef]: mime } : {}
+  ).images[imageRef];
 
   const downloadImage = async (asset) => {
-    if (!asset.url) return;
-    try {
-      const response = await fetch(asset.url);
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      // Use name + node ID suffix to ensure uniqueness (matches CSS class naming)
-      const safeName = asset.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-');
-      const idSuffix = asset.nodeId.replace(/[^a-zA-Z0-9]/g, '');
-      a.download = `${safeName}_${idSuffix}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch {
-      window.open(asset.url, '_blank');
+    if (!isApi) {
+      const img = source.images?.[asset.imageRef];
+      if (!img?.data) return;
+      const bytes = base64ToBytes(img.data);
+      const mime = img.mime || detectMime(bytes);
+      triggerDownload(new Blob([bytes], { type: mime }), fileNameFor(asset.imageRef));
+      return;
     }
-  };
-
-  const downloadAllImages = async () => {
-    for (const asset of imageAssets.filter((i) => i.included && i.url)) {
-      await downloadImage(asset);
-      await new Promise((r) => setTimeout(r, 300));
+    const url = previewUrl(asset);
+    if (!url) return;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      const mime = detectMime(bytes);
+      triggerDownload(new Blob([bytes], { type: mime }), fileNameFor(asset.imageRef, mime));
+    } catch {
+      window.open(url, '_blank', 'noopener');
     }
   };
 
@@ -225,19 +130,18 @@ export default function AssetSelector({
         </button>
       </div>
 
-      {/* FONTS SECTION */}
       {activeSection === 'fonts' && (
         <div className="asset-section">
           {fontAssets.length === 0 ? (
             <div className="asset-empty">
-              <p>No custom fonts detected in your selection.</p>
+              <p>No fonts detected in your selection.</p>
             </div>
           ) : (
             <>
               <div className="asset-toolbar">
                 <span className="asset-count">{includedFonts} of {fontAssets.length} fonts included</span>
-                <button className="btn btn-secondary btn-sm" onClick={downloadFontCSS} disabled={includedFonts === 0}>
-                  ⬇ Download Font CSS
+                <button className="btn btn-secondary btn-sm" onClick={openFontCSS} disabled={!fontsUrl}>
+                  ⬇ Open Google Fonts CSS
                 </button>
               </div>
               <div className="font-list">
@@ -251,6 +155,7 @@ export default function AssetSelector({
                       <span className="font-card-meta">
                         {font.count} usage{font.count !== 1 ? 's' : ''} •
                         Weights: {font.weights.join(', ')}
+                        {font.italic ? ' • italic' : ''}
                       </span>
                       <span className={`font-card-badge ${font.isGoogleFont ? 'google' : 'custom'}`}>
                         {font.isGoogleFont ? '✓ Google Fonts' : '⚠ Custom font'}
@@ -264,63 +169,71 @@ export default function AssetSelector({
                 ))}
               </div>
               <p className="asset-hint">
-                Fonts marked "Google Fonts" will be loaded via CSS import. Custom fonts need to be self-hosted — download them separately.
+                Fonts marked "Google Fonts" are linked from Google Fonts. Custom fonts need to be self-hosted — download them separately.
               </p>
             </>
           )}
         </div>
       )}
 
-      {/* IMAGES SECTION */}
       {activeSection === 'images' && (
         <div className="asset-section">
-          {imageLoading ? (
-            <div className="asset-loading">
-              <span className="spinner"></span>
-              <p>Loading images: {imageProgress.loaded}/{imageProgress.total}</p>
-              {imageProgress.total > 0 && (
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${(imageProgress.loaded / imageProgress.total) * 100}%` }} />
-                </div>
-              )}
-            </div>
-          ) : imageAssets.length === 0 ? (
+          {imageAssets.length === 0 ? (
             <div className="asset-empty">
               <p>No image fills found in your selection.</p>
               <p className="asset-hint">Solid colors and gradients are converted to CSS directly.</p>
             </div>
           ) : (
             <>
-              {imageError && <p className="error-message">{imageError}</p>}
+              {fillLoading && (
+                <div className="asset-loading">
+                  <span className="spinner"></span>
+                  <p>Loading image fill URLs from Figma…</p>
+                </div>
+              )}
+              {fillError && (
+                <div className="asset-error">
+                  <p className="error-message">Could not load images from Figma: {fillError}</p>
+                  <button className="btn btn-secondary btn-sm" onClick={loadFills} disabled={fillLoading}>
+                    Retry
+                  </button>
+                </div>
+              )}
               <div className="asset-toolbar">
                 <span className="asset-count">{includedImages} of {imageAssets.length} images included</span>
-                <button className="btn btn-secondary btn-sm" onClick={downloadAllImages} disabled={includedImages === 0}>
-                  ⬇ Download All ({includedImages})
-                </button>
+                <span className="asset-hint">Download everything at once with “Download .zip” on the next step.</span>
               </div>
               <div className="images-grid">
-                {imageAssets.map((asset) => (
-                  <div key={asset.nodeId} className={`image-card ${asset.included ? 'included' : 'excluded'}`}>
-                    <div className="image-card-preview">
-                      {asset.url ? (
-                        <img src={asset.url} alt={asset.name} className="image-card-img" loading="lazy" />
-                      ) : (
-                        <div className="image-card-placeholder"><span>⚠️</span></div>
-                      )}
-                      {asset.url && (
-                        <button className="image-download-btn" onClick={() => downloadImage(asset)} title="Download">⬇</button>
-                      )}
+                {imageAssets.map((asset) => {
+                  const url = previewUrl(asset);
+                  return (
+                    <div key={asset.imageRef} className={`image-card ${asset.included ? 'included' : 'excluded'}`}>
+                      <div className="image-card-preview">
+                        {url ? (
+                          <img src={url} alt={asset.name} className="image-card-img" loading="lazy" />
+                        ) : (
+                          <div className="image-card-placeholder"><span>⚠️</span></div>
+                        )}
+                        {url && (
+                          <button className="image-download-btn" onClick={() => downloadImage(asset)} title="Download">⬇</button>
+                        )}
+                      </div>
+                      <div className="image-card-info">
+                        <span className="image-card-name">{asset.name}</span>
+                        <span className="image-card-size">
+                          {Math.round(asset.width)}×{Math.round(asset.height)}
+                        </span>
+                        <span className="image-card-size" title={asset.layers.map((l) => l.path).join('\n')}>
+                          Used by {asset.layers.length} layer{asset.layers.length !== 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      <label className="asset-toggle">
+                        <input type="checkbox" checked={asset.included} onChange={() => toggleImage(asset.imageRef)} />
+                        <span>{asset.included ? 'Included' : 'Excluded'}</span>
+                      </label>
                     </div>
-                    <div className="image-card-info">
-                      <span className="image-card-name">{asset.name}</span>
-                      <span className="image-card-size">{Math.round(asset.width)}×{Math.round(asset.height)}</span>
-                    </div>
-                    <label className="asset-toggle">
-                      <input type="checkbox" checked={asset.included} onChange={() => toggleImage(asset.nodeId)} />
-                      <span>{asset.included ? 'Included' : 'Excluded'}</span>
-                    </label>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </>
           )}
@@ -329,7 +242,7 @@ export default function AssetSelector({
 
       <div className="btn-row">
         <button className="btn btn-secondary" onClick={onBack}>← Back</button>
-        <button className="btn btn-primary" onClick={onContinue}>
+        <button className="btn btn-primary" onClick={onContinue} disabled={!ready}>
           Generate CSS →
         </button>
       </div>

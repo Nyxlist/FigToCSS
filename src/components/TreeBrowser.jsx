@@ -210,15 +210,16 @@ export default function TreeBrowser({ fileData, selectedNodes, setSelectedNodes,
   }
 
   const handleSelectAll = () => {
-    // Collect all selectable nodes
+    // Only visible top-level layers of each page (direct children of CANVAS).
     const all = [];
-    function collect(node) {
-      if (isNodeSelectable(node.type)) {
-        all.push({ id: node.id, name: node.name, type: node.type });
-      }
-      if (node.children) node.children.forEach(collect);
-    }
-    document.children?.forEach(collect);
+    (document.children || []).forEach((page) => {
+      if (page.type !== 'CANVAS') return;
+      (page.children || []).forEach((node) => {
+        if (node.visible !== false && isNodeSelectable(node.type)) {
+          all.push({ id: node.id, name: node.name, type: node.type });
+        }
+      });
+    });
     setSelectedNodes(all);
   };
 
